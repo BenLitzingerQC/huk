@@ -150,8 +150,8 @@ def generate_lar_heatmap(data):
         cbar_kws={"label": "Number of DZs per LAR combination"},
         linewidths=3.5,
     )
-    ax.set_xlabel("LAR Dok2 (lar__2)")
-    ax.set_ylabel("LAR Dok1 (lar)")
+    ax.set_xlabel("LAR Doc. 2")
+    ax.set_ylabel("LAR Doc. 1")
     plt.xticks(rotation=45, ha="right")
     plt.yticks(rotation=0)
 
@@ -211,102 +211,23 @@ def generate_time_difference_plot(data):
     )
     ax.bar(bins[:-1], counts_tp, width=1.0, color="green", label="True Positives")
 
-    ax.set_xlabel("Time Difference in Days (Dok1 - Dok2)")
+    ax.set_xlabel("Time Difference in Days (Doc. 1 - Doc. 2)")
     ax.set_ylabel("Count")
-    ax.set_title("Time Difference of Positive Predictions")
+    ax.set_title(
+        "Time Difference of Positive Predictions for Business Optimal Rule",
+        loc="left",
+        pad=25,
+    )
+    ax.text(
+        x=0, y=1.02,
+        s=f"",
+        transform=ax.transAxes,
+        fontsize=10,
+        fontweight="normal",
+        ha="left",
+        va="bottom"
+    )
     ax.legend()
-
-    return fig
-
-
-def generate_prec_rec_plot(
-    prec_values,
-    rec_values,
-    num_pos_preds,
-    prec_values_full=None,
-    rec_values_full=None,
-    num_pos_preds_full=None,
-):
-    fig = plt.figure(figsize=(10, 6))
-
-    # Training curve
-    plt.plot(
-        rec_values,
-        prec_values,
-        marker=".",
-        zorder=1,
-        label="Train (downsampled)",
-        color="steelblue",
-    )
-    bbox_props = dict(boxstyle="round,pad=0.2", fc="lightgrey", ec="none", alpha=0.8)
-    for r, p, n in zip(rec_values, prec_values, num_pos_preds):
-        plt.annotate(
-            str(int(n)),
-            (r, p),
-            textcoords="offset points",
-            xytext=(1, 1),
-            fontsize=9,
-            bbox=bbox_props,
-        )
-
-    # Full data curve (optional)
-    if prec_values_full is not None:
-        plt.plot(
-            rec_values_full,
-            prec_values_full,
-            marker=".",
-            zorder=1,
-            label="Full data",
-            color="darkorange",
-            linestyle="--",
-        )
-        bbox_props_full = dict(
-            boxstyle="round,pad=0.2", fc="moccasin", ec="none", alpha=0.8
-        )
-        for r, p, n in zip(rec_values_full, prec_values_full, num_pos_preds_full):
-            plt.annotate(
-                str(int(n)),
-                (r, p),
-                textcoords="offset points",
-                xytext=(1, 1),
-                fontsize=9,
-                bbox=bbox_props_full,
-            )
-
-    plt.xlim(-0.02, 1.05)
-    plt.ylim(-0.02, 1.05)
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title("Precision-Recall curve for possible rules")
-
-    legend_elements = [
-        mpatches.Patch(
-            facecolor="lightgrey", alpha=0.8, label="# positive predictions (train)"
-        ),
-    ]
-    if prec_values_full is not None:
-        legend_elements.append(
-            mpatches.Patch(
-                facecolor="moccasin", alpha=0.8, label="# positive predictions (full)"
-            )
-        )
-
-    plt.legend(
-        handles=legend_elements
-        + [
-            plt.Line2D([0], [0], color="steelblue", marker=".", label="Train"),
-            plt.Line2D(
-                [0],
-                [0],
-                color="darkorange",
-                marker=".",
-                linestyle="--",
-                label="Full data",
-            ),
-        ],
-        loc="lower left",
-    )
-    plt.grid(True, linestyle="--", color="lightgrey", alpha=0.5)
 
     return fig
 
@@ -314,11 +235,9 @@ def generate_prec_rec_plot(
 def savings_analysis(data: pl.DataFrame, label_col: str):
     """
     Fetches MAX_REIMBURSEMENT for all positives (label=True) in one DB round-trip,
-
     then computes aggregates for two subsets:
       - all_pos:  every labelled positive regardless of or_mask
       - tp_only:  true positives (label=True AND or_mask=True)
-
     Returns
     -------
     {
@@ -335,16 +254,9 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
     conn_sw = get_engine(database="spielwiese")
     raw_ids = ["StackID", "DocID", "SubDocID", "StackID__2", "DocID__2", "SubDocID__2"]
 
-    logging.info(f"savings_analysis: input columns: {data.columns}")
     logging.info(f"savings_analysis: total rows={data.height}, positives={data.filter(pl.col(label_col)).height}")
 
-    # Capture TP IDs before the DB round-trip — or_mask won't survive the query
-    tp_ids = (
-        data.filter(pl.col(label_col) & pl.col("or_mask"))
-        .select(raw_ids)
-    )
-    logging.info(f"savings_analysis: tp_ids captured: {tp_ids.height} rows")
-
+    # Drop existing table to ensure fresh data
     with conn_sw.begin() as conn:
         try:
             conn.execute(text("DROP TABLE DA00249.TEMP_DZ_SAVINGS"))
@@ -352,15 +264,18 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
         except Exception as e:
             logging.info(f"savings_analysis: no table to drop (expected): {e}")
 
-    positives = data.filter(pl.col(label_col))
-    logging.info(f"savings_analysis: writing {positives.height} rows with columns {positives.columns}")
-    positives.write_database(
+    # Write ALL rows (not just positives) — label_col and or_mask stay intact
+    logging.info(f"savings_analysis: writing {data.height} rows")
+    data.filter(
+        pl.col(label_col)
+    ).write_database(
         table_name="DA00249.TEMP_DZ_SAVINGS",
         connection=conn_sw,
         engine_options={"dtype": {c: VARCHAR(length=50) for c in raw_ids}},
     )
     logging.info("savings_analysis: write complete")
 
+    # Create indices for performance
     with conn_sw.connect() as conn:
         conn.execute(text("""
             CREATE INDEX idx_temp_ids
@@ -373,6 +288,7 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
         conn.commit()
     logging.info("savings_analysis: indices created")
 
+    # Read back only positives with enrichment
     data_enriched = (
         pl.read_database(
             query="""
@@ -398,17 +314,27 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
     ).with_columns(
         pl.min_horizontal("^MAX_REIMBURSEMENT.*$").alias("MIN_MAX_REIMBURSEMENT")
     )
-    logging.info(f"savings_analysis: enriched rows={data_enriched.height}, columns={data_enriched.columns}")
+    logging.info(f"savings_analysis: enriched rows={data_enriched.height}")
 
-    tp_enriched = data_enriched.join(tp_ids, on=raw_ids, how="inner")
-    logging.info(f"savings_analysis: tp_enriched rows={tp_enriched.height}")
+    # Filter to positives and split by or_mask — all in Polars
+    tp_enriched = data_enriched.filter(pl.col("OR_MASK").cast(pl.Boolean))
+    logging.info(f"savings_analysis: all_pos rows={data_enriched.height}, tp_only rows={tp_enriched.height}")
+
+    logging.info(
+        f"# tp_enriched {tp_enriched.height}, # data_enriched: {data_enriched.height}"
+    )
+
+    # Use exact column names for PAID_OUT
+    paid_out_cols = [col for col in data_enriched.columns if col.upper().startswith("PAID_OUT")]
 
     def _agg(df: pl.DataFrame) -> dict:
         total = float(df["MIN_MAX_REIMBURSEMENT"].sum())
-        avg = total / df.height if df.height > 0 else 0.0
-        paid = df.filter(pl.all_horizontal("^PAID_OUT.*$").cast(pl.Boolean))
+        avg = total / df.height
+
+        paid = df.filter(pl.all_horizontal("^PAID_OUT.*$"))
+
         p_total = float(paid["MIN_MAX_REIMBURSEMENT"].sum())
-        p_avg = p_total / paid.height if paid.height > 0 else 0.0
+        p_avg = p_total / paid.height
         return {
             "total_savings": total,
             "average_savings": avg,
@@ -495,26 +421,34 @@ def _net_value(precision, recall, total_pos, review_cost, savings_per_tp):
     total_flagged = tp / precision if precision > 0 else 0
     return tp * savings_per_tp - total_flagged * review_cost
 
+def _window_name_to_subtitle(window_name: str) -> str:
+    """Converts window name to a human-readable Doc. 1/Doc. 2 subtitle."""
+    mapping = {
+        "November_2025__October_2025": "Doc. 1=November 2025, Doc. 2=Oktober/November 2025",
+        "November_2025__2_years_historic": "Doc. 1=November 2025, Doc. 2=November 2023–November 2025",
+    }
+    return mapping.get(window_name, window_name)
 
 def plot_pr_value_landscape(
     precision,
     recall,
     steps,
+    num_pos_preds,
     total_pos,
     review_cost,
-    savings_per_tp,
+    avg_savings_per_dz,
     best_i=None,
+    window_name=None
 ):
     """
     Precision-Recall curve on top of a € net-value heatmap.
-
     Returns fig.
     """
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    be_prec = review_cost / savings_per_tp
+    be_prec = review_cost / avg_savings_per_dz
     nv = [
-        _net_value(p, r, total_pos, review_cost, savings_per_tp)
+        _net_value(p, r, total_pos, review_cost, avg_savings_per_dz)
         for p, r in zip(precision, recall)
     ]
     if best_i is None:
@@ -523,8 +457,8 @@ def plot_pr_value_landscape(
     rr = np.linspace(0.01, 1.0, 200)
     pp = np.linspace(0.01, 1.0, 200)
     RR, PP = np.meshgrid(rr, pp)
-    NV = RR * total_pos * (savings_per_tp - review_cost / PP)
-    max_gain = total_pos * savings_per_tp
+    NV = RR * total_pos * (avg_savings_per_dz - review_cost / PP)
+    max_gain = total_pos * avg_savings_per_dz
 
     ax.contourf(
         RR,
@@ -557,8 +491,8 @@ def plot_pr_value_landscape(
         zorder=1,
     )
 
-    target_prec = 0.45
-    denom = savings_per_tp - review_cost / target_prec
+    target_prec = 0.5
+    denom = avg_savings_per_dz - review_cost / target_prec
     if denom > 0:
         for v in iso_levels:
             rec = v / (total_pos * denom)
@@ -582,7 +516,7 @@ def plot_pr_value_landscape(
                 )
 
     cs0 = ax.contour(RR, PP, NV, levels=[0], colors="black", linewidths=1.0, zorder=2)
-    ax.clabel(cs0, inline=True, fontsize=8, fmt={0: "Break-even (0 €)"})
+    ax.clabel(cs0, inline=True, fontsize=8, fmt={0: "Break-Even precision (0 EUR)"}, manual=[(0.5, be_prec)])
 
     ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
     dot_colors = [
@@ -598,6 +532,19 @@ def plot_pr_value_landscape(
         edgecolors="white",
         linewidths=1,
     )
+
+    bbox_props = dict(boxstyle="round,pad=0.2", fc="lightgrey", ec="none", alpha=0.8)
+    for r, p, n in zip(recall, precision, num_pos_preds):
+        ax.annotate(
+            str(n),
+            (r, p),
+            textcoords="offset points",
+            xytext=(4, 4),
+            fontsize=7,
+            bbox=bbox_props,
+            zorder=7,
+        )
+
     ax.scatter(
         [recall[best_i]],
         [precision[best_i]],
@@ -608,11 +555,11 @@ def plot_pr_value_landscape(
         linewidths=1.5,
     )
     ax.annotate(
-        f"Optimum\nStep {steps[best_i]}\n"
+        f"Optimum\n"
         f"Prec={precision[best_i]:.0%}, Rec={recall[best_i]:.0%}",
         xy=(recall[best_i], precision[best_i]),
         xycoords="data",
-        xytext=(0.05, 0.72),
+        xytext=(0.6, 0.3),
         textcoords="axes fraction",
         fontsize=8,
         color="black",
@@ -634,24 +581,48 @@ def plot_pr_value_landscape(
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_title(
-        "Precision-Recall mit Netto-Wert-Landschaft\n"
-        "(Iso-Linien = gleicher € Netto-Wert)",
+        "Precision-recall trade-off and expected value optimum derivation",
         loc="left",
         fontweight="bold",
+        pad=25,
+    )
+    ax.text(
+        x=0, y=1.02,
+        s=f"Review cost={review_cost:.2f} EUR, Avg. saving per DZ={avg_savings_per_dz:.2f} EUR, {_window_name_to_subtitle(window_name)}",
+        transform=ax.transAxes,
+        fontsize=10,
+        fontweight="normal",
+        ha="left",
+        va="bottom"
     )
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(
         handles=[
-            mpatches.Patch(color="#4daf4a", alpha=0.6, label="Gewinn-Zone"),
-            mpatches.Patch(color=ACCENT, label="Business-Optimum"),
+            mpatches.Patch(color="#4daf4a", alpha=0.6, label="Profit zone"),
+            mpatches.Patch(color=ACCENT, label="Optimum"),
         ],
         frameon=True,
         facecolor="white",
         edgecolor="#cccccc",
         loc="lower left",
     )
-    return fig
+    return fig, best_i
 
+def filter_data_to_best_rules(
+    base_data: pl.DataFrame,
+    comp,
+    label_col: str,
+    best_i: int,
+) -> pl.DataFrame:
+    """
+    Re-applies only the first best_i+1 rules as or_mask.
+    Used to restrict plots/analysis to the business-optimal rule subset.
+    """
+    best_comp = comp[: best_i + 1]
+    return base_data.with_columns(
+        pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
+        pl.any_horizontal(best_comp).alias("or_mask"),
+    )
 
 def evaluate_rule(
     greedy_rules,
@@ -663,7 +634,6 @@ def evaluate_rule(
 ):
     """
     Evaluates greedy and final rule sets on two time windows.
-
     Returns
     -------
     {
@@ -675,12 +645,19 @@ def evaluate_rule(
         "November_2025__2_years_historic": { ... },
     }
     """
-    # --- Compute savings_per_tp once from all positives over the full base filter ---
-    # We read only the label column + IDs for the global savings estimate.
+    # Compute savings_per_tp once from all positives over the full base filter
     logging.info("Starting to read data.")
     base_data = pl.read_parquet(data_path).filter(filter_expression)
     logging.info("Finished reading the data.")
     return_dict: dict[str, dict] = {}
+
+    for col in ("HUKIMPORTTIME", "HUKIMPORTTIME__2"):
+        if col not in base_data.columns:
+            raise ValueError(
+                f"Column '{col}' not found in parquet. "
+                f"Available columns: {base_data.columns}"
+            )
+
 
     for window_name, window_filter in EVAL_WINDOWS:
         return_dict[window_name] = {}
@@ -698,13 +675,9 @@ def evaluate_rule(
                 pl.any_horizontal(comp).alias("or_mask"),
             )
 
-            # --- Savings (Option A: one DB round-trip, returns all_pos + tp_only) ---
             savings_result = savings_analysis(data, label_col)
+            avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
 
-            # savings_per_tp: data-driven estimate from ALL positives (unrestricted avg)
-            savings_per_tp = savings_result["all_pos"]["average_savings"]
-
-            # --- Prec/rec curve on the windowed full data ---
             prec_values, rec_values, num_pos_preds = full_data_prec_rec_per_rule(
                 data, label_col, comp
             )
@@ -714,28 +687,30 @@ def evaluate_rule(
 
             in_stack_out_stack = in_stack_out_stack_analysis(data)
 
-            # --- Plots ---
-            prec_rec_plot = generate_prec_rec_plot(
-                prec_values, rec_values, num_pos_preds
-            )
-            pr_value_plot = plot_pr_value_landscape(
+            # Plots
+            pr_value_plot, best_i = plot_pr_value_landscape(
                 precision=prec_values,
                 recall=rec_values,
                 steps=steps,
+                num_pos_preds=num_pos_preds,
                 total_pos=total_pos,
                 review_cost=review_cost,
-                savings_per_tp=savings_per_tp,
+                avg_savings_per_dz=avg_savings_per_dz,
+                window_name=window_name
             )
-            lar_heatmap_plot = generate_lar_heatmap(data)
-            time_diff_plot = generate_time_difference_plot(data)
+
+            data_optimum_rule = filter_data_to_best_rules(
+                base_data.filter(window_filter), comp, label_col, best_i
+            )
+
+            lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
+            time_diff_plot = generate_time_difference_plot(data_optimum_rule)
 
             return_dict[window_name][comp_name] = {
-                "prec_rec": prec_rec_plot,
                 "pr_value": pr_value_plot,
                 "lar_heatmap": lar_heatmap_plot,
                 "time_difference": time_diff_plot,
-                # savings sub-dicts kept flat for easy MLflow access
-                "savings": savings_result["tp_only"],
+                "savings_tp": savings_result["tp_only"],
                 "savings_all_pos": savings_result["all_pos"],
                 **in_stack_out_stack,
             }
