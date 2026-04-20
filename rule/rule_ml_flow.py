@@ -120,7 +120,7 @@ def load_data(
     groups = detect_feature_groups(schema_cols, label_col)
     pred_cols = [f"{t}_{feat}" for feat, thresholds in groups for t in thresholds]
     # Lar is needed because of OLD_DZ_RULE
-    needed = pred_cols + [label_col, "lar", "lar__2", origin_col]
+    needed = pred_cols + [label_col, "lar", "lar__2", "HUKIMPORTTIME", "HUKIMPORTTIME__2", origin_col]
 
     # Load with optional negative downsampling
     if positive_rate is not None:
@@ -551,7 +551,7 @@ def build_runtime_config(cfg: dict) -> dict:
     data_path = filepath_shared_folder / cfg["data_subfolder"] / file_name
 
     f = cfg["filter"]
-    polars_filter = (
+    base_filter = (
         ~(OLD_DZ_RULE)
         & (
             ~pl.col("lar").str.starts_with(f["exclude_lar_prefix"])
@@ -560,13 +560,28 @@ def build_runtime_config(cfg: dict) -> dict:
         & pl.col("lar").ne(f["exclude_lar_value"])
     )
 
+    train_filter = base_filter
+    if train_start := f.get("train_start"):
+        train_filter = train_filter & pl.col("HUKIMPORTTIME").ge(
+            pl.datetime(*[int(x) for x in train_start.split("-")])
+        ) & pl.col("HUKIMPORTTIME__2").ge(
+            pl.datetime(*[int(x) for x in train_start.split("-")])
+        )
+    if train_end := f.get("train_end"):
+        train_filter = train_filter & pl.col("HUKIMPORTTIME").lt(
+            pl.datetime(*[int(x) for x in train_end.split("-")])
+        ) & pl.col("HUKIMPORTTIME__2").lt(
+            pl.datetime(*[int(x) for x in train_end.split("-")])
+        )
+
     identifiers_map = {"dev": AggregationIdentifiers.dev()}
     identifiers = identifiers_map[cfg["identifiers"]]
 
     return {
         "FILE_NAME": file_name,
         "DATA_PATH": data_path,
-        "FILTER": polars_filter,
+        "FILTER": train_filter,
+        "EVAL_FILTER": base_filter,
         "LABEL_COL": cfg["label_col"],
         "POSITIVE_RATE": cfg["positive_rate"],
         "TEST_SPLIT": cfg["test_split"],
@@ -590,6 +605,7 @@ def main(cfg: DictConfig):
     FILE_NAME = built["FILE_NAME"]
     DATA_PATH = built["DATA_PATH"]
     FILTER = built["FILTER"]
+    EVAL_FILTER = built["EVAL_FILTER"]
     LABEL_COL = built["LABEL_COL"]
     POSITIVE_RATE = built["POSITIVE_RATE"]
     TEST_SPLIT = built["TEST_SPLIT"]
@@ -715,17 +731,14 @@ def main(cfg: DictConfig):
         # Plot precision Recall curve
         setup_plotting()
         evaluation_dict = evaluate_rule(
-            selected_rules, final_rules, FILTER, LABEL_COL, DATA_PATH, REVIEW_COST
+            selected_rules, final_rules, EVAL_FILTER, LABEL_COL, DATA_PATH, REVIEW_COST
         )
 
         for window_name, comp_dict in evaluation_dict.items():
             for comp_name, plot_dict in comp_dict.items():
                 prefix = f"plots/{window_name}/{comp_name}"
                 mlflow.log_figure(
-                    plot_dict["prec_rec"], f"{prefix}/precision_recall.png"
-                )
-                mlflow.log_figure(
-                    plot_dict["pr_value"], f"{prefix}/pr_value_landscape.png"
+                    plot_dict["pr_value"], f"{prefix}/prec_rec_value_.png"
                 )
                 mlflow.log_figure(plot_dict["lar_heatmap"], f"{prefix}/lar_heatmap.png")
                 mlflow.log_figure(
@@ -775,26 +788,15 @@ def main(cfg: DictConfig):
                 "13_OUT_STACK_TOTAL_POS": float(gw["out_of_stack_stats"]["total_pos"]),
                 "14_OUT_STACK_TP": float(gw["out_of_stack_stats"]["tp"]),
                 "15_OUT_STACK_POS_PRED": float(gw["out_of_stack_stats"]["pos_pred"]),
-                "10_2_IN_STACK_TOTAL_POS": float(fw["in_stack_stats"]["total_pos"]),
-                "11_2_IN_STACK_POS_PRED": float(fw["in_stack_stats"]["pos_pred"]),
-                "12_2_IN_STACK_TP": float(fw["in_stack_stats"]["tp"]),
-                "13_2_OUT_STACK_TOTAL_POS": float(
-                    fw["out_of_stack_stats"]["total_pos"]
-                ),
-                "14_2_OUT_STACK_TP": float(fw["out_of_stack_stats"]["tp"]),
-                "15_2_OUT_STACK_POS_PRED": float(fw["out_of_stack_stats"]["pos_pred"]),
                 # TP-only savings (was "savings" before)
-                "TOTAL SUM OF MIN MAX_REIMB OF TPS": gw["savings"]["total_savings"],
-                "TOTAL AVG OF MIN MAX_REIMB OF TPS": gw["savings"]["average_savings"],
-                "BOTH PAID SUM OF MIN MAX_REIMB OF TPS": gw["savings"][
-                    "both_paid_total"
-                ],
-                "BOTH PAID AVG OF MIN MAX_REIMB OF TPS": gw["savings"]["both_paid_avg"],
-                # All-positives savings (new)
-                "ALL_POS TOTAL SAVINGS": gw["savings_all_pos"]["total_savings"],
-                "ALL_POS AVG SAVINGS savings_per_tp est": gw["savings_all_pos"][
-                    "average_savings"
-                ],
+                "16_ALL_POS TOTAL SAVINGS": gw["savings_all_pos"]["total_savings"],
+                "17_ALL_POS AVG SAVINGS": gw["savings_all_pos"]["average_savings"],
+                "18_BOTH PAID TOTAL_SAVINGS": gw["savings_all_pos"]["both_paid_total"],
+                "19_BOTH PAID AVG SAVINGS": gw["savings_all_pos"]["both_paid_avg"],
+                "20_TPS TOTAL SAVINGS": gw["savings_tp"]["total_savings"],
+                "21_TPS_AVG_SAVINGS": gw["savings_tp"]["average_savings"],
+                "22_TPS_BOTH PAID TOTAL_SAVINGS": gw["savings_tp"]["both_paid_total"],
+                "23_TPS_BOTH PAID AVG SAVINGS": gw["savings_tp"]["both_paid_avg"],
             }
         )
 
@@ -805,6 +807,11 @@ def main(cfg: DictConfig):
                 "RULES POST REDUNDANT": selected_rules_post_redundant,
             },
             "rules.json",
+        )
+
+        mlflow.log_dict(
+            evaluation_dict,
+            artifact_file="evaluation.json"
         )
 
 
