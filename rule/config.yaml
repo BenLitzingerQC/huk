@@ -1,27 +1,29 @@
-# config.yaml
- 
-file_name: "2026_q1_until_2025_q4__16_04_2026_without_unclear.parquet"
+# config.yml
+
+file_name: "25_12_15_until_23_10_01_all_labels_without_unclear__19_04_2026_.parquet"
 data_subfolder: "dz/labelling/full_data_sets"
- 
+
 filter:
   exclude_lar_prefix: "3"
   exclude_lar_value: "141"
- 
+  train_start: "2025-10-01"
+  train_end: "2025-12-25"
+
 label_col: "dz_interesting"
 positive_rate: 0.1
 test_split: null
- 
+
 flatfile_type: "outpatient"
 identifiers: "dev"  # maps to AggregationIdentifiers.dev()
- 
+
 review_cost: 20
- 
+
 origin:
   col: "origin"
   weights:
     self_labelled: 1.0
   default_weight: 1.0
- 
+
 learning:
   max_predicates_per_rule: 2
   max_rules: 1000
