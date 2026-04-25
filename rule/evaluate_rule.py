@@ -1,5 +1,6 @@
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 
 import matplotlib.patches as mpatches
@@ -10,6 +11,8 @@ import seaborn as sns
 from da_hf5_utils.db2 import get_engine
 from sqlalchemy import text
 from sqlalchemy.types import VARCHAR
+
+from historic_precision import cumulative_precision, estimate_historic_precision
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,11 +162,7 @@ def generate_lar_heatmap(data):
 
 
 def generate_time_difference_plot(data):
-    """
-    Stacked bar chart:
-    - Grau: alle positiven Predictions (or_mask)
-    - Grün: True Positives (or_mask & labels)
-    """
+    """Generates a stacked bar chart showing recall on time difference of pairs."""
     data = data.with_columns(
         (pl.col("HUKIMPORTTIME") - pl.col("HUKIMPORTTIME__2"))
         .dt.total_days()
@@ -219,13 +218,14 @@ def generate_time_difference_plot(data):
         pad=25,
     )
     ax.text(
-        x=0, y=1.02,
-        s=f"",
+        x=0,
+        y=1.02,
+        s="",
         transform=ax.transAxes,
         fontsize=10,
         fontweight="normal",
         ha="left",
-        va="bottom"
+        va="bottom",
     )
     ax.legend()
 
@@ -235,6 +235,7 @@ def generate_time_difference_plot(data):
 def savings_analysis(data: pl.DataFrame, label_col: str):
     """
     Fetches MAX_REIMBURSEMENT for all positives (label=True) in one DB round-trip,
+
     then computes aggregates for two subsets:
       - all_pos:  every labelled positive regardless of or_mask
       - tp_only:  true positives (label=True AND or_mask=True)
@@ -250,11 +251,13 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
     savings_per_tp estimate for the PR-value landscape.
     """
     data = data.drop(["LAR", "LAR__2"])
-    
+
     conn_sw = get_engine(database="spielwiese")
     raw_ids = ["StackID", "DocID", "SubDocID", "StackID__2", "DocID__2", "SubDocID__2"]
 
-    logging.info(f"savings_analysis: total rows={data.height}, positives={data.filter(pl.col(label_col)).height}")
+    logging.info(
+        f"savings_analysis: total rows={data.height}, positives={data.filter(pl.col(label_col)).height}"
+    )
 
     # Drop existing table to ensure fresh data
     with conn_sw.begin() as conn:
@@ -265,10 +268,8 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
             logging.info(f"savings_analysis: no table to drop (expected): {e}")
 
     # Write ALL rows (not just positives) — label_col and or_mask stay intact
-    logging.info(f"savings_analysis: writing {data.height} rows")
-    data.filter(
-        pl.col(label_col)
-    ).write_database(
+    logging.info(f"savings_analysis: writing {data.filter(pl.col(label_col)).height} rows")
+    data.filter(pl.col(label_col)).write_database(
         table_name="DA00249.TEMP_DZ_SAVINGS",
         connection=conn_sw,
         engine_options={"dtype": {c: VARCHAR(length=50) for c in raw_ids}},
@@ -277,14 +278,18 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
 
     # Create indices for performance
     with conn_sw.connect() as conn:
-        conn.execute(text("""
+        conn.execute(
+            text("""
             CREATE INDEX idx_temp_ids
             ON DA00249.TEMP_DZ_SAVINGS ("StackID", "DocID", "SubDocID")
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE INDEX idx_temp_ids_2
             ON DA00249.TEMP_DZ_SAVINGS ("StackID__2", "DocID__2", "SubDocID__2")
-        """))
+        """)
+        )
         conn.commit()
     logging.info("savings_analysis: indices created")
 
@@ -318,14 +323,13 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
 
     # Filter to positives and split by or_mask — all in Polars
     tp_enriched = data_enriched.filter(pl.col("OR_MASK").cast(pl.Boolean))
-    logging.info(f"savings_analysis: all_pos rows={data_enriched.height}, tp_only rows={tp_enriched.height}")
+    logging.info(
+        f"savings_analysis: all_pos rows={data_enriched.height}, tp_only rows={tp_enriched.height}"
+    )
 
     logging.info(
         f"# tp_enriched {tp_enriched.height}, # data_enriched: {data_enriched.height}"
     )
-
-    # Use exact column names for PAID_OUT
-    paid_out_cols = [col for col in data_enriched.columns if col.upper().startswith("PAID_OUT")]
 
     def _agg(df: pl.DataFrame) -> dict:
         total = float(df["MIN_MAX_REIMBURSEMENT"].sum())
@@ -421,13 +425,19 @@ def _net_value(precision, recall, total_pos, review_cost, savings_per_tp):
     total_flagged = tp / precision if precision > 0 else 0
     return tp * savings_per_tp - total_flagged * review_cost
 
+
 def _window_name_to_subtitle(window_name: str) -> str:
-    """Converts window name to a human-readable Doc. 1/Doc. 2 subtitle."""
+    """
+    Converts window name to a human-readable Doc.
+
+    1/Doc. 2 subtitle.
+    """
     mapping = {
         "November_2025__October_2025": "Doc. 1=November 2025, Doc. 2=Oktober/November 2025",
         "November_2025__2_years_historic": "Doc. 1=November 2025, Doc. 2=November 2023–November 2025",
     }
     return mapping.get(window_name, window_name)
+
 
 def plot_pr_value_landscape(
     precision,
@@ -438,10 +448,13 @@ def plot_pr_value_landscape(
     review_cost,
     avg_savings_per_dz,
     best_i=None,
-    window_name=None
+    window_name=None,
+    precision_se=None,
+    ci_z=1.96,
 ):
     """
     Precision-Recall curve on top of a € net-value heatmap.
+
     Returns fig.
     """
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -454,17 +467,18 @@ def plot_pr_value_landscape(
     if best_i is None:
         best_i = int(np.argmax(nv))
 
-    rr = np.linspace(0.01, 1.0, 200)
-    pp = np.linspace(0.01, 1.0, 200)
-    RR, PP = np.meshgrid(rr, pp)
-    NV = RR * total_pos * (avg_savings_per_dz - review_cost / PP)
+    recall_axis = np.linspace(0.01, 1.0, 200)
+    precision_axis = np.linspace(0.01, 1.0, 200)
+    recall_grid, precision_grid = np.meshgrid(recall_axis, precision_axis)
+    NV = recall_grid * total_pos * (avg_savings_per_dz - review_cost / precision_grid)
     max_gain = total_pos * avg_savings_per_dz
 
+    contourf_step_size = 2000
     ax.contourf(
-        RR,
-        PP,
+        recall_grid,
+        precision_grid,
         np.where(NV > 0, NV, np.nan),
-        levels=40,
+        levels=np.arange(0, max_gain + contourf_step_size, contourf_step_size),
         cmap="Greens",
         vmin=0,
         vmax=max_gain,
@@ -472,17 +486,11 @@ def plot_pr_value_landscape(
         zorder=0,
     )
 
-    for s in (5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000):
-        if max_gain / s <= 8:
-            step_size = s
-            break
-    else:
-        step_size = 1_000_000
-
-    iso_levels = np.arange(step_size, max_gain + step_size, step_size)
+    iso_step_size = 10_000
+    iso_levels = np.arange(iso_step_size, max_gain + iso_step_size, iso_step_size)
     ax.contour(
-        RR,
-        PP,
+        recall_grid,
+        precision_grid,
         NV,
         levels=iso_levels,
         colors="#444444",
@@ -492,31 +500,43 @@ def plot_pr_value_landscape(
     )
 
     target_prec = 0.5
-    denom = avg_savings_per_dz - review_cost / target_prec
-    if denom > 0:
-        for v in iso_levels:
-            rec = v / (total_pos * denom)
-            if 0.12 < rec < 0.85:
-                ax.text(
-                    rec,
-                    target_prec,
-                    f"{v / 1000:.0f}K €",
-                    fontsize=7,
-                    color="#333333",
-                    ha="center",
-                    va="center",
-                    rotation=-30,
-                    bbox=dict(
-                        boxstyle="round,pad=0.15",
-                        facecolor="white",
-                        edgecolor="none",
-                        alpha=0.75,
-                    ),
-                    zorder=2,
-                )
+    for v in iso_levels:
+        rec = v / (total_pos * (avg_savings_per_dz - review_cost / target_prec))
+        if 0.05 < rec < 0.95:
+            ax.text(
+                rec,
+                target_prec,
+                f"{v / 1000:.0f}K €",
+                fontsize=7,
+                color="#333333",
+                ha="center",
+                va="center",
+                rotation=-30,
+                bbox=dict(
+                    boxstyle="round,pad=0.15",
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.75,
+                ),
+                zorder=2,
+            )
 
-    cs0 = ax.contour(RR, PP, NV, levels=[0], colors="black", linewidths=1.0, zorder=2)
-    ax.clabel(cs0, inline=True, fontsize=8, fmt={0: "Break-Even precision (0 EUR)"}, manual=[(0.5, be_prec)])
+    cs0 = ax.contour(
+        recall_grid,
+        precision_grid,
+        NV,
+        levels=[0],
+        colors="black",
+        linewidths=1.0,
+        zorder=2,
+    )
+    ax.clabel(
+        cs0,
+        inline=True,
+        fontsize=8,
+        fmt={0: "Break-Even precision (0 EUR)"},
+        manual=[(0.5, be_prec)],
+    )
 
     ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
     dot_colors = [
@@ -532,6 +552,14 @@ def plot_pr_value_landscape(
         edgecolors="white",
         linewidths=1,
     )
+
+    if precision_se is not None:
+        ax.errorbar(
+            recall, precision,
+            yerr=[ci_z * se for se in precision_se],
+            fmt="none", ecolor="#333333", elinewidth=0.8,
+            capsize=3, zorder=3,
+        )
 
     bbox_props = dict(boxstyle="round,pad=0.2", fc="lightgrey", ec="none", alpha=0.8)
     for r, p, n in zip(recall, precision, num_pos_preds):
@@ -555,8 +583,7 @@ def plot_pr_value_landscape(
         linewidths=1.5,
     )
     ax.annotate(
-        f"Optimum\n"
-        f"Prec={precision[best_i]:.0%}, Rec={recall[best_i]:.0%}",
+        f"Optimum\nPrec={precision[best_i]:.0%}, Rec={recall[best_i]:.0%}",
         xy=(recall[best_i], precision[best_i]),
         xycoords="data",
         xytext=(0.6, 0.3),
@@ -587,13 +614,14 @@ def plot_pr_value_landscape(
         pad=25,
     )
     ax.text(
-        x=0, y=1.02,
+        x=0,
+        y=1.02,
         s=f"Review cost={review_cost:.2f} EUR, Avg. saving per DZ={avg_savings_per_dz:.2f} EUR, {_window_name_to_subtitle(window_name)}",
         transform=ax.transAxes,
         fontsize=10,
         fontweight="normal",
         ha="left",
-        va="bottom"
+        va="bottom",
     )
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(
@@ -608,6 +636,7 @@ def plot_pr_value_landscape(
     )
     return fig, best_i
 
+
 def filter_data_to_best_rules(
     base_data: pl.DataFrame,
     comp,
@@ -616,6 +645,7 @@ def filter_data_to_best_rules(
 ) -> pl.DataFrame:
     """
     Re-applies only the first best_i+1 rules as or_mask.
+
     Used to restrict plots/analysis to the business-optimal rule subset.
     """
     best_comp = comp[: best_i + 1]
@@ -624,16 +654,20 @@ def filter_data_to_best_rules(
         pl.any_horizontal(best_comp).alias("or_mask"),
     )
 
+
 def evaluate_rule(
-    greedy_rules,
-    final_rules,
+    greedy_rules: list[list[str]],
+    final_rules: list[list[str]],
     filter_expression,
-    label_col,
-    data_path,
-    review_cost,
-):
+    label_col: str,
+    data_path: Path,
+    review_cost: float,
+) -> dict[str, dict[str, Any]]:
     """
     Evaluates greedy and final rule sets on two time windows.
+    Args:
+
+
     Returns
     -------
     {
@@ -650,14 +684,6 @@ def evaluate_rule(
     base_data = pl.read_parquet(data_path).filter(filter_expression)
     logging.info("Finished reading the data.")
     return_dict: dict[str, dict] = {}
-
-    for col in ("HUKIMPORTTIME", "HUKIMPORTTIME__2"):
-        if col not in base_data.columns:
-            raise ValueError(
-                f"Column '{col}' not found in parquet. "
-                f"Available columns: {base_data.columns}"
-            )
-
 
     for window_name, window_filter in EVAL_WINDOWS:
         return_dict[window_name] = {}
@@ -696,8 +722,31 @@ def evaluate_rule(
                 total_pos=total_pos,
                 review_cost=review_cost,
                 avg_savings_per_dz=avg_savings_per_dz,
-                window_name=window_name
+                window_name=window_name,
             )
+
+            if window_name == "November_2025__2_years_historic" and comp_name == "greedy":
+                per_k = estimate_historic_precision(
+                    rules, data_path, filter_expression, label_col
+                )
+                cum = cumulative_precision(per_k)
+                p_hat = cum["P_hat_m"].to_list()[: len(prec_values)]
+                se_hat = cum["SE_m"].to_list()[: len(prec_values)]
+
+                pr_value_plot_hist, _ = plot_pr_value_landscape(
+                    precision=p_hat,
+                    recall=rec_values,
+                    steps=steps,
+                    num_pos_preds=num_pos_preds,
+                    total_pos=total_pos,
+                    review_cost=review_cost,
+                    avg_savings_per_dz=avg_savings_per_dz,
+                    window_name=window_name,
+                    precision_se=se_hat,
+                )
+                return_dict[window_name][comp_name]["pr_value_estimated"] = (
+                    pr_value_plot_hist
+                )
 
             data_optimum_rule = filter_data_to_best_rules(
                 base_data.filter(window_filter), comp, label_col, best_i
