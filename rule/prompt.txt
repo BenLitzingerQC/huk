@@ -1,0 +1,157 @@
+# Task: Historic Precision Estimator                                                                                                                                              
+                                                                                                                                                                                    
+  Kontext-Dateien lesen:                                                                                                                                                            
+  - da_hf5_dz/scripts/evaluate_rule.py                                                                                                                                              
+  - da_hf5_dz/scripts/rule_ML_FLOW.py                                                                                                                                               
+  - da_hf5_dz/scripts/historic_sampling.py                                                                                                                                          
+  - da_hf5_dz/configs/rules/config.yaml                                                                                                                                             
+                                                                                                                                                                                    
+  ## Hintergrund                                                                                                                                                                    
+  ~500 Paare im 2-Jahres-Historic-Window wurden via stratifiziertem Sampling                                                                                                        
+  (historic_sampling.py) manuell gelabelt. Labels sind jetzt im Parquet. Strata =                                                                                                   
+  Index der ersten greedy Rule, die trifft. Ziel: Precision + SE pro kumulativer                                                                                                    
+  Rule-Sequenz schätzen, Error-Bars im PR-Plot für das Historic-Window zeigen.                                                                                                      
+                                                                                                                                                                                    
+  ## Schritt 1: Neue Datei `da_hf5_dz/scripts/historic_precision.py`                                                                                                                
+                                                                                                                                                                                    
+  ```python                                                                                                                                                                         
+  import logging  
+                                                                                                                                                                                    
+  import numpy as np
+  import polars as pl                                                                                                                                                               
+                                                                                                                                                                                    
+  from historic_sampling import HISTORIC_UNLABELED_FILTER                                                                                                                           
+                                                                                                                                                                                    
+                                                                                                                                                                                    
+  def _assign_first_hit(data, greedy_rules):
+      first_hit = pl.lit(-1, dtype=pl.Int32)                                                                                                                                        
+      for k, rule in enumerate(greedy_rules):                                                                                                                                       
+          mask = pl.all_horizontal(                                                                                                                                                 
+              [pl.col(c).cast(pl.Boolean).fill_null(False) for c in rule]                                                                                                           
+          )                                                                                                                                                                         
+          first_hit = pl.when((first_hit < 0) & mask).then(k).otherwise(first_hit)                                                                                                  
+      return data.with_columns(first_hit.alias("stratum_k"))                                                                                                                        
+                                                                                                                                                                                    
+                                                                                                                                                                                    
+  def estimate_historic_precision(greedy_rules, data_path, base_filter, label_col):                                                                                                 
+      """Returns DataFrame: stratum_k | N_k | n_k | tp_k | p_hat_k | se_k."""                                                                                                       
+      data = (                                                                                                                                                                      
+          pl.scan_parquet(data_path)                                                                                                                                                
+          .filter(base_filter & HISTORIC_UNLABELED_FILTER)                                                                                                                          
+          .collect()                                                                                                                                                                
+      )                                                                                                                                                                             
+      data = _assign_first_hit(data, greedy_rules).filter(pl.col("stratum_k").ge(0))                                                                                                
+                                                                                                                                                                                    
+      N_per_k = data.group_by("stratum_k").agg(pl.len().alias("N_k"))                                                                                                               
+      labelled = data.filter(pl.col(label_col).is_not_null())                                                                                                                       
+                                                                                                                                                                                    
+      per_k = (                                                                                                                                                                     
+          labelled.group_by("stratum_k")                                                                                                                                            
+          .agg(                                                                                                                                                                     
+              pl.len().alias("n_k"),
+              pl.col(label_col).cast(pl.Boolean).sum().alias("tp_k"),                                                                                                               
+          )                                                                                                                                                                         
+          .join(N_per_k, on="stratum_k", how="right")                                                                                                                               
+          .with_columns(pl.col("n_k").fill_null(0), pl.col("tp_k").fill_null(0))                                                                                                    
+          .with_columns(                                                                                                                                                            
+              pl.when(pl.col("n_k") > 0)                                                                                                                                            
+              .then(pl.col("tp_k") / pl.col("n_k"))                                                                                                                                 
+              .alias("p_hat_k")                                                                                                                                                     
+          )                                                                                                                                                                         
+          .with_columns(                                                                                                                                                            
+              (pl.col("p_hat_k") * (1 - pl.col("p_hat_k")) / pl.col("n_k"))                                                                                                         
+              .sqrt()                                                                                                                                                               
+              .alias("se_k")                                                                                                                                                        
+          )                                                                                                                                                                         
+          .sort("stratum_k")                                                                                                                                                        
+      )                                                                                                                                                                             
+      logging.info(f"historic_precision per stratum:\n{per_k}")                                                                                                                     
+      return per_k                                                                                                                                                                  
+                                                                                                                                                                                    
+                                                                                                                                                                                    
+  def cumulative_precision(per_k):                                                                                                                                                  
+      """For each m in 1..K: P_hat_m = Σ w_i p_i, SE_m = sqrt(Σ w_i² se_i²)."""                                                                                                     
+      per_k = per_k.sort("stratum_k")                                                                                                                                               
+      rows = []                                                                                                                                                                     
+      for m in range(1, per_k.height + 1):                                                                                                                                          
+          head = per_k.head(m).filter(pl.col("n_k") > 0)                                                                                                                            
+          if head.is_empty():                                                                                                                                                       
+              rows.append({"m": m, "N_1_to_m": 0, "P_hat_m": None, "SE_m": None})                                                                                                   
+              continue                                                                                                                                                              
+          N = head["N_k"].sum()                                                                                                                                                     
+          w = (head["N_k"] / N).to_numpy()                                                                                                                                          
+          p = head["p_hat_k"].to_numpy()                                                                                                                                            
+          se = head["se_k"].to_numpy()                                                                                                                                              
+          rows.append({                                                                                                                                                             
+              "m": m,                                                                                                                                                               
+              "N_1_to_m": int(per_k.head(m)["N_k"].sum()),                                                                                                                          
+              "P_hat_m": float(np.sum(w * p)),                                                                                                                                      
+              "SE_m": float(np.sqrt(np.sum(w**2 * se**2))),                                                                                                                         
+          })                                                                                                                                                                        
+      return pl.DataFrame(rows)                                                                                                                                                     
+                                                                                                                                                                                    
+  Schritt 2: plot_pr_value_landscape in evaluate_rule.py erweitern                                                                                                                  
+                                                                                                                                                                                    
+  Signatur ergänzen:                                                                                                                                                                
+  def plot_pr_value_landscape(
+      precision, recall, steps, num_pos_preds, total_pos,                                                                                                                           
+      review_cost, avg_savings_per_dz,                                                                                                                                              
+      best_i=None, window_name=None,                                                                                                                                                
+      precision_se=None, ci_z=1.96,                                                                                                                                                 
+  ):                                                                                                                                                                                
+                                                                                                                                                                                    
+  Direkt nach dem ax.scatter(recall, precision, ...)-Block einfügen:                                                                                                                
+      if precision_se is not None:                                                                                                                                                  
+          ax.errorbar(                                                                                                                                                            
+              recall, precision,                                                                                                                                                    
+              yerr=[ci_z * se for se in precision_se],                                                                                                                              
+              fmt="none", ecolor="#333333", elinewidth=0.8,                                                                                                                         
+              capsize=3, zorder=3,                                                                                                                                                  
+          )                                                                                                                                                                         
+                                                                                                                                                                                    
+  Schritt 3: Integration in evaluate_rule                                                                                                                                           
+                                                                                                                                                                                    
+  Oben in evaluate_rule.py:                                                                                                                                                         
+  from historic_precision import cumulative_precision, estimate_historic_precision                                                                                                  
+                                                                                                                                                                                    
+  Im Loop, NACH dem bestehenden pr_value_plot, best_i = plot_pr_value_landscape(...),                                                                                               
+  füge hinzu:                                                                                                                                                                       
+              if window_name == "November_2025__2_years_historic" and comp_name == "greedy":                                                                                        
+                  per_k = estimate_historic_precision(                                                                                                                              
+                      rules, data_path, filter_expression, label_col                                                                                                                
+                  )                                                                                                                                                                 
+                  cum = cumulative_precision(per_k)                                                                                                                                 
+                  p_hat = cum["P_hat_m"].to_list()[: len(prec_values)]                                                                                                              
+                  se_hat = cum["SE_m"].to_list()[: len(prec_values)]                                                                                                                
+                                                                                                                                                                                    
+                  pr_value_plot_hist, _ = plot_pr_value_landscape(                                                                                                                  
+                      precision=p_hat,                                                                                                                                              
+                      recall=rec_values,                                                                                                                                            
+                      steps=steps,                                                                                                                                                  
+                      num_pos_preds=num_pos_preds,                                                                                                                                  
+                      total_pos=total_pos,                                                                                                                                          
+                      review_cost=review_cost,                                                                                                                                      
+                      avg_savings_per_dz=avg_savings_per_dz,                                                                                                                        
+                      window_name=window_name,                                                                                                                                      
+                      precision_se=se_hat,                                                                                                                                          
+                  )                                                                                                                                                                 
+                  return_dict[window_name][comp_name]["pr_value_estimated"] = (                                                                                                     
+                      pr_value_plot_hist                                                                                                                                            
+                  )                                                                                                                                                                 
+                                                                                                                                                                                    
+  Schritt 4: MLflow-Logging in rule_ML_FLOW.py                                                                                                                                      
+                                                                                                                                                                                    
+  Im for window_name, comp_dict in evaluation_dict.items():-Block, nach                                                                                                             
+  mlflow.log_figure(plot_dict["time_difference"], ...):                                                                                                                             
+                  if "pr_value_estimated" in plot_dict:                                                                                                                             
+                      mlflow.log_figure(               
+                          plot_dict["pr_value_estimated"],                                                                                                                          
+                          f"{prefix}/prec_rec_value_estimated.png",                                                                                                                 
+                      )                                                                                                                                                             
+                                                                                                                                                                                    
+  Nicht tun                                                                                                                                                                         
+                                                                                                                                                                                    
+  - Keine anderen Funktionen anfassen.                                                                                                                                              
+  - Keine neuen Dateien außer historic_precision.py.                                                                                                                                
+  - Keine Docstrings hinzufügen.                                                                                                                                                    
+  - savings_analysis bleibt unverändert. 
