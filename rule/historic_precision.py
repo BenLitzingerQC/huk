@@ -6,24 +6,33 @@ import polars as pl
 from historic_sampling import HISTORIC_UNLABELED_FILTER
 
 
-def _assign_first_hit(data, greedy_rules):
-    first_hit = pl.lit(-1, dtype=pl.Int32)
-    for k, rule in enumerate(greedy_rules):
-        mask = pl.all_horizontal(
-            [pl.col(c).cast(pl.Boolean).fill_null(False) for c in rule]
-        )
-        first_hit = pl.when((first_hit < 0) & mask).then(k).otherwise(first_hit)
-    return data.with_columns(first_hit.alias("stratum_k"))
+def _first_hit_from_masks(and_masks):
+    """stratum_k = index of first True mask per row, -1 if none. Operates on numpy."""
+    stratum = np.full(len(and_masks[0]), -1, dtype=np.int32)
+    for k, mask in enumerate(and_masks):
+        m = mask.to_numpy() if isinstance(mask, pl.Series) else mask
+        stratum = np.where((stratum < 0) & m, k, stratum)
+    return stratum
 
 
-def estimate_historic_precision(greedy_rules, data_path, base_filter, label_col):
-    """Returns DataFrame: stratum_k | N_k | n_k | tp_k | p_hat_k | se_k."""
-    data = (
-        pl.scan_parquet(data_path)
-        .filter(base_filter & HISTORIC_UNLABELED_FILTER)
-        .collect()
+def estimate_historic_precision(and_masks, data, label_col):
+    """Returns DataFrame: stratum_k | N_k | n_k | tp_k | p_hat_k | se_k.
+
+    `data` and each mask in `and_masks` must be aligned (same length).
+    Restricts to HISTORIC_UNLABELED_FILTER rows before stratifying.
+    """
+    historic_mask = (
+        data.select(HISTORIC_UNLABELED_FILTER.alias("m")).to_series().to_numpy()
     )
-    data = _assign_first_hit(data, greedy_rules).filter(pl.col("stratum_k").ge(0))
+    logging.info(f"historic_precision: {historic_mask.sum()} rows in unlabeled historic window")
+    and_masks_hist = [m.to_numpy()[historic_mask] for m in and_masks]
+    stratum = _first_hit_from_masks(and_masks_hist)
+
+    data = (
+        data.filter(pl.Series("_m", historic_mask))
+        .with_columns(pl.Series("stratum_k", stratum))
+        .filter(pl.col("stratum_k").ge(0))
+    )
 
     N_per_k = data.group_by("stratum_k").agg(pl.len().alias("N_k"))
     labelled = data.filter(pl.col(label_col).is_not_null())

@@ -251,15 +251,15 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
     savings_per_tp estimate for the PR-value landscape.
     """
     data = data.drop(["LAR", "LAR__2"])
+    positives = data.filter(pl.col(label_col).cast(pl.Boolean).fill_null(False))
 
     conn_sw = get_engine(database="spielwiese")
     raw_ids = ["StackID", "DocID", "SubDocID", "StackID__2", "DocID__2", "SubDocID__2"]
 
     logging.info(
-        f"savings_analysis: total rows={data.height}, positives={data.filter(pl.col(label_col)).height}"
+        f"savings_analysis: total rows={data.height}, positives={positives.height}"
     )
 
-    # Drop existing table to ensure fresh data
     with conn_sw.begin() as conn:
         try:
             conn.execute(text("DROP TABLE DA00249.TEMP_DZ_SAVINGS"))
@@ -267,9 +267,8 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
         except Exception as e:
             logging.info(f"savings_analysis: no table to drop (expected): {e}")
 
-    # Write ALL rows (not just positives) — label_col and or_mask stay intact
-    logging.info(f"savings_analysis: writing {data.filter(pl.col(label_col)).height} rows")
-    data.filter(pl.col(label_col)).write_database(
+    logging.info(f"savings_analysis: writing {positives.height} positive rows")
+    positives.write_database(
         table_name="DA00249.TEMP_DZ_SAVINGS",
         connection=conn_sw,
         engine_options={"dtype": {c: VARCHAR(length=50) for c in raw_ids}},
@@ -395,11 +394,13 @@ def full_data_prec_rec_per_rule(data, label_col, rules):
     n_rows_full = len(labels_full)
 
     prec_values, rec_values, num_pos_preds = [], [], []
+    and_masks = []
     cum_or = pl.Series("", [False] * n_rows_full, dtype=pl.Boolean)
 
     for rule in rules:
         # rule is already a Polars expression (pl.all_horizontal(...))
         and_mask = data.select(rule).to_series().cast(pl.Boolean).fill_null(False)
+        and_masks.append(and_mask)
         cum_or = cum_or | and_mask
 
         tp = int((cum_or & labels_full).sum())
@@ -416,7 +417,7 @@ def full_data_prec_rec_per_rule(data, label_col, rules):
             else " EMPTY"
         )
     )
-    return prec_values, rec_values, num_pos_preds
+    return prec_values, rec_values, num_pos_preds, and_masks
 
 
 def _net_value(precision, recall, total_pos, review_cost, savings_per_tp):
@@ -655,6 +656,38 @@ def filter_data_to_best_rules(
     )
 
 
+def historic_estimated_plot(
+    window_data,
+    and_masks,
+    label_col,
+    rec_values,
+    num_pos_preds,
+    steps,
+    total_pos,
+    review_cost,
+    avg_savings_per_dz,
+    window_name,
+):
+    """Builds the historic-window PR plot with estimated precision + error bars."""
+    per_k = estimate_historic_precision(and_masks, window_data, label_col)
+    cum = cumulative_precision(per_k)
+    p_hat = cum["P_hat_m"].to_list()[: len(rec_values)]
+    se_hat = cum["SE_m"].to_list()[: len(rec_values)]
+
+    fig, _ = plot_pr_value_landscape(
+        precision=p_hat,
+        recall=rec_values,
+        steps=steps,
+        num_pos_preds=num_pos_preds,
+        total_pos=total_pos,
+        review_cost=review_cost,
+        avg_savings_per_dz=avg_savings_per_dz,
+        window_name=window_name,
+        precision_se=se_hat,
+    )
+    return fig
+
+
 def evaluate_rule(
     greedy_rules: list[list[str]],
     final_rules: list[list[str]],
@@ -704,8 +737,8 @@ def evaluate_rule(
             savings_result = savings_analysis(data, label_col)
             avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
 
-            prec_values, rec_values, num_pos_preds = full_data_prec_rec_per_rule(
-                data, label_col, comp
+            prec_values, rec_values, num_pos_preds, and_masks = (
+                full_data_prec_rec_per_rule(data, label_col, comp)
             )
 
             total_pos = int(data["labels"].sum())
@@ -725,29 +758,6 @@ def evaluate_rule(
                 window_name=window_name,
             )
 
-            if window_name == "November_2025__2_years_historic" and comp_name == "greedy":
-                per_k = estimate_historic_precision(
-                    rules, data_path, filter_expression, label_col
-                )
-                cum = cumulative_precision(per_k)
-                p_hat = cum["P_hat_m"].to_list()[: len(prec_values)]
-                se_hat = cum["SE_m"].to_list()[: len(prec_values)]
-
-                pr_value_plot_hist, _ = plot_pr_value_landscape(
-                    precision=p_hat,
-                    recall=rec_values,
-                    steps=steps,
-                    num_pos_preds=num_pos_preds,
-                    total_pos=total_pos,
-                    review_cost=review_cost,
-                    avg_savings_per_dz=avg_savings_per_dz,
-                    window_name=window_name,
-                    precision_se=se_hat,
-                )
-                return_dict[window_name][comp_name]["pr_value_estimated"] = (
-                    pr_value_plot_hist
-                )
-
             data_optimum_rule = filter_data_to_best_rules(
                 base_data.filter(window_filter), comp, label_col, best_i
             )
@@ -755,7 +765,7 @@ def evaluate_rule(
             lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
             time_diff_plot = generate_time_difference_plot(data_optimum_rule)
 
-            return_dict[window_name][comp_name] = {
+            result = {
                 "pr_value": pr_value_plot,
                 "lar_heatmap": lar_heatmap_plot,
                 "time_difference": time_diff_plot,
@@ -763,5 +773,24 @@ def evaluate_rule(
                 "savings_all_pos": savings_result["all_pos"],
                 **in_stack_out_stack,
             }
+
+            return_dict[window_name][comp_name] = result
+
+            if window_name == "November_2025__2_years_historic" and comp_name == "greedy":
+                return_dict[window_name]["greedy_estimated"] = {
+                    **result,
+                    "pr_value": historic_estimated_plot(
+                        window_data=data,
+                        and_masks=and_masks,
+                        label_col=label_col,
+                        rec_values=rec_values,
+                        num_pos_preds=num_pos_preds,
+                        steps=steps,
+                        total_pos=total_pos,
+                        review_cost=review_cost,
+                        avg_savings_per_dz=avg_savings_per_dz,
+                        window_name=window_name,
+                    ),
+                }
 
     return return_dict

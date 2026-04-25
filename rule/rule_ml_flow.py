@@ -751,11 +751,6 @@ def main(cfg: DictConfig):
                 mlflow.log_figure(
                     plot_dict["time_difference"], f"{prefix}/time_difference.png"
                 )
-                if "pr_value_estimated" in plot_dict:
-                    mlflow.log_figure(
-                        plot_dict["pr_value_estimated"],
-                        f"{prefix}/prec_rec_value_estimated.png"
-                    )
 
         plt.close("all")
 
