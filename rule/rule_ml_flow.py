@@ -551,6 +551,8 @@ def build_runtime_config(cfg: dict) -> dict:
     data_path = filepath_shared_folder / cfg["data_subfolder"] / file_name
 
     f = cfg["filter"]
+    label_col = cfg["label_col"]
+
     base_filter = (
         ~(OLD_DZ_RULE)
         & (
@@ -560,19 +562,24 @@ def build_runtime_config(cfg: dict) -> dict:
         & pl.col("lar").ne(f["exclude_lar_value"])
     )
 
-    train_filter = base_filter
+    date_filter = pl.lit(True)
     if train_start := f.get("train_start"):
-        train_filter = train_filter & pl.col("HUKIMPORTTIME").ge(
+        date_filter = date_filter & pl.col("HUKIMPORTTIME").ge(
             pl.datetime(*[int(x) for x in train_start.split("-")])
         ) & pl.col("HUKIMPORTTIME__2").ge(
             pl.datetime(*[int(x) for x in train_start.split("-")])
         )
     if train_end := f.get("train_end"):
-        train_filter = train_filter & pl.col("HUKIMPORTTIME").lt(
+        date_filter = date_filter & pl.col("HUKIMPORTTIME").lt(
             pl.datetime(*[int(x) for x in train_end.split("-")])
         ) & pl.col("HUKIMPORTTIME__2").lt(
             pl.datetime(*[int(x) for x in train_end.split("-")])
         )
+
+    # Positives bypass the date filter, negatives must pass it
+    train_filter = base_filter & (
+        pl.col(label_col).cast(pl.Boolean).fill_null(False) | date_filter
+    )
 
     identifiers_map = {"dev": AggregationIdentifiers.dev()}
     identifiers = identifiers_map[cfg["identifiers"]]
@@ -744,6 +751,11 @@ def main(cfg: DictConfig):
                 mlflow.log_figure(
                     plot_dict["time_difference"], f"{prefix}/time_difference.png"
                 )
+                if "pr_value_estimated" in plot_dict:
+                    mlflow.log_figure(
+                        plot_dict["pr_value_estimated"],
+                        f"{prefix}/prec_rec_value_estimated.png"
+                    )
 
         plt.close("all")
 
