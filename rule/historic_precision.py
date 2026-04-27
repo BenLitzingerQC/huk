@@ -3,13 +3,13 @@ import logging
 import numpy as np
 import polars as pl
 
-LABELED_DOC2 = pl.col("HUKIMPORTTIME__2").ge(pl.datetime(2025, 10, 1)) & pl.col(
-    "HUKIMPORTTIME__2"
-).lt(pl.datetime(2025, 12, 25))
-
 
 def _first_hit_from_masks(and_masks):
-    """stratum_k = index of first True mask per row, -1 if none. Operates on numpy."""
+    """
+    stratum_k = index of first True mask per row, -1 if none.
+
+    Operates on numpy.
+    """
     stratum = np.full(len(and_masks[0]), -1, dtype=np.int32)
     for k, mask in enumerate(and_masks):
         m = mask.to_numpy() if isinstance(mask, pl.Series) else mask
@@ -23,20 +23,15 @@ def estimate_historic_precision(and_masks, data, label_col):
     `data` and each mask in `and_masks` must be aligned (same length).
     Restricts to HISTORIC_UNLABELED_FILTER rows before stratifying.
     """
-    historic_mask = data.select((~LABELED_DOC2).alias("m")).to_series().to_numpy()
-    logging.info(f"historic_precision: {historic_mask.sum()} rows in unlabeled historic window")
-    and_masks_hist = [m.to_numpy()[historic_mask] for m in and_masks]
-    stratum = _first_hit_from_masks(and_masks_hist)
+
+    stratum = _first_hit_from_masks(and_masks)
 
     data = (
-        data.filter(pl.Series("_m", historic_mask))
-        .with_columns(pl.Series("stratum_k", stratum))
+        data.with_columns(pl.Series("stratum_k", stratum))
         .filter(pl.col("stratum_k").ge(0))
     )
 
-    all_strata = pl.DataFrame(
-        {"stratum_k": np.arange(len(and_masks), dtype=np.int32)}
-    )
+    all_strata = pl.DataFrame({"stratum_k": np.arange(len(and_masks), dtype=np.int32)})
     N_per_k = all_strata.join(
         data.group_by("stratum_k").agg(pl.len().alias("N_k")),
         on="stratum_k",
@@ -73,7 +68,9 @@ def estimate_historic_precision(and_masks, data, label_col):
 
 
 def cumulative_precision(per_k):
-    """For each m in 1..K: P_hat_m = Σ w_i p_i, SE_m = sqrt(Σ w_i² se_i²)."""
+    """
+    For each m in 1..K: P_hat_m = Σ w_i p_i, SE_m = sqrt(sum(w_i^2,se_i^2)).
+    """
     per_k = per_k.sort("stratum_k")
     rows = []
     for m in range(1, per_k.height + 1):
@@ -85,22 +82,26 @@ def cumulative_precision(per_k):
         w = (head["N_k"] / N).to_numpy()
         p = head["p_hat_k"].to_numpy()
         se = head["se_k"].to_numpy()
-        rows.append({
-            "m": m,
-            "N_1_to_m": int(per_k.head(m)["N_k"].sum()),
-            "P_hat_m": float(np.sum(w * p)),
-            "SE_m": float(np.sqrt(np.sum(w**2 * se**2))),
-        })
+        rows.append(
+            {
+                "m": m,
+                "N_1_to_m": int(per_k.head(m)["N_k"].sum()),
+                "P_hat_m": float(np.sum(w * p)),
+                "SE_m": float(np.sqrt(np.sum(w**2 * se**2))),
+            }
+        )
     return pl.DataFrame(rows)
 
 
 def labeled_cumulative_precision(and_masks, data, label_col):
-    """Exact cumulative precision on the labeled subset (complement of HISTORIC_UNLABELED_FILTER).
+    """
+    Exact cumulative precision on the labeled subset (complement of
+    HISTORIC_UNLABELED_FILTER).
 
     Returns DataFrame: m | N_lab_m | TP_lab_m | P_lab_m.
     Null labels are treated as False.
     """
-    labeled_mask = data.select(LABELED_DOC2.alias("m")).to_series().to_numpy()
+    labeled_mask = data.select(pl.col(label_col).is_not_null().alias("m")).to_series().to_numpy()
     labels = (
         data.select(pl.col(label_col).cast(pl.Boolean).fill_null(False))
         .to_series()
@@ -116,24 +117,28 @@ def labeled_cumulative_precision(and_masks, data, label_col):
         cum_or = cum_or | m_arr[labeled_mask]
         n_lab = int(cum_or.sum())
         tp_lab = int((cum_or & labels_lab).sum())
-        rows.append({
-            "m": m,
-            "N_lab_m": n_lab,
-            "TP_lab_m": tp_lab,
-            "P_lab_m": tp_lab / n_lab if n_lab > 0 else None,
-        })
+        rows.append(
+            {
+                "m": m,
+                "N_lab_m": n_lab,
+                "TP_lab_m": tp_lab,
+                "P_lab_m": tp_lab / n_lab if n_lab > 0 else None,
+            }
+        )
     return pl.DataFrame(rows)
 
 
 def combined_precision(labeled_cum, historic_cum):
-    """Combines exact labeled precision with estimated historic precision.
+    """
+    Combines exact labeled precision with estimated historic precision.
 
     P_combined_m = (N_lab_m · P_lab_m + N_hist_m · P_hat_hist_m) / (N_lab_m + N_hist_m)
     SE_combined_m = (N_hist_m / (N_lab_m + N_hist_m)) · SE_hat_hist_m
 
-    Labeled counts are exact (zero variance); only the historic estimator contributes SE.
-    If a stratum has no historic sample (SE_hat is null), we fall back to labeled-only
-    for that m — i.e. P_combined = P_lab, SE = 0 — which is honest about what we know.
+    Labeled counts are exact (zero variance); only the historic estimator contributes
+    SE. If a stratum has no historic sample (SE_hat is null), we fall back to labeled-
+    only for that m — i.e. P_combined = P_lab, SE = 0 — which is honest about what we
+    know.
     """
     joined = labeled_cum.join(historic_cum, on="m", how="inner").with_columns(
         (pl.col("N_lab_m") + pl.col("N_1_to_m")).alias("N_total_m"),
@@ -159,7 +164,8 @@ def combined_precision(labeled_cum, historic_cum):
 
 
 def expected_savings_curve(combined, avg_savings_per_dz, review_cost):
-    """Expected net value per m using the combined (labeled + historic) estimator.
+    """
+    Expected net value per m using the combined (labeled + historic) estimator.
 
     TP_est_m   = TP_lab_m + N_1_to_m · P_hat_m
     NV_est_m   = TP_est_m · avg_savings − N_flagged_m · review_cost
@@ -177,8 +183,7 @@ def expected_savings_curve(combined, avg_savings_per_dz, review_cost):
         ).alias("TP_est_m"),
     ).with_columns(
         (
-            pl.col("TP_est_m") * avg_savings_per_dz
-            - pl.col("N_total_m") * review_cost
+            pl.col("TP_est_m") * avg_savings_per_dz - pl.col("N_total_m") * review_cost
         ).alias("NV_est_m"),
         pl.when(pl.col("SE_m").is_not_null())
         .then(avg_savings_per_dz * pl.col("N_1_to_m") * pl.col("SE_m"))
