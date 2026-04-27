@@ -548,24 +548,26 @@ def plot_pr_value_landscape(
         manual=[(0.5, be_prec)],
     )
 
+    ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
+
     if precision_se is not None:
         recall_arr = np.asarray(recall, dtype=float)
         prec_arr = np.asarray(precision, dtype=float)
         se_arr = np.asarray(precision_se, dtype=float)
-        order = np.argsort(recall_arr)
-        lower = np.clip(prec_arr - ci_z * se_arr, 0, 1)
-        upper = np.clip(prec_arr + ci_z * se_arr, 0, 1)
-        ax.fill_between(
-            recall_arr[order],
-            lower[order],
-            upper[order],
-            color=BLOOD_RED,
-            alpha=0.25,
-            linewidth=0,
-            zorder=2,
+        lower_err = prec_arr - np.clip(prec_arr - ci_z * se_arr, 0, 1)
+        upper_err = np.clip(prec_arr + ci_z * se_arr, 0, 1) - prec_arr
+        ax.errorbar(
+            recall_arr,
+            prec_arr,
+            yerr=np.vstack([lower_err, upper_err]),
+            fmt="none",
+            ecolor=BLOOD_RED,
+            elinewidth=1.0,
+            capsize=3,
+            capthick=1.0,
+            alpha=0.8,
+            zorder=3,
         )
-
-    ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
     dot_colors = []
     for i in range(len(steps)):
         if has_evidence is not None and not has_evidence[i]:
