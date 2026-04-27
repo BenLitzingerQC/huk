@@ -17,6 +17,7 @@ flatfile_type: "outpatient"
 identifiers: "dev"  # maps to AggregationIdentifiers.dev()
 
 review_cost: 20
+min_reimbursement_threshold: 100  # drop pairs whose MIN(MAX_REIMBURSEMENT, MAX_REIMBURSEMENT__2) ≤ threshold
 
 origin:
   col: "origin"
