@@ -352,7 +352,7 @@ def greedy_select(
             if new_tp < adaptive_min:
                 continue
 
-            new_pos = uncovered
+            new_pos = uncovered.sum()
             marginal_prec = (cum_tp + new_tp) / (cum_pos + new_pos)
 
             if marginal_prec > best_score:
