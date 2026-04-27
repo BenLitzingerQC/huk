@@ -37,21 +37,24 @@ def estimate_historic_precision(and_masks, data, label_col):
     all_strata = pl.DataFrame(
         {"stratum_k": np.arange(len(and_masks), dtype=np.int32)}
     )
-    N_per_k = (
-        data.group_by("stratum_k")
-        .agg(pl.len().alias("N_k"))
-        .join(all_strata, on="stratum_k", how="right")
-        .with_columns(pl.col("N_k").fill_null(0))
-    )
+    N_per_k = all_strata.join(
+        data.group_by("stratum_k").agg(pl.len().alias("N_k")),
+        on="stratum_k",
+        how="left",
+    ).with_columns(pl.col("N_k").fill_null(0))
+
     labelled = data.filter(pl.col(label_col).is_not_null())
 
     per_k = (
-        labelled.group_by("stratum_k")
-        .agg(
-            pl.len().alias("n_k"),
-            pl.col(label_col).cast(pl.Boolean).sum().alias("tp_k"),
+        all_strata.join(
+            labelled.group_by("stratum_k").agg(
+                pl.len().alias("n_k"),
+                pl.col(label_col).cast(pl.Boolean).sum().alias("tp_k"),
+            ),
+            on="stratum_k",
+            how="left",
         )
-        .join(N_per_k, on="stratum_k", how="right")
+        .join(N_per_k, on="stratum_k", how="left")
         .with_columns(pl.col("n_k").fill_null(0), pl.col("tp_k").fill_null(0))
         .with_columns(
             pl.when(pl.col("n_k") > 0)
