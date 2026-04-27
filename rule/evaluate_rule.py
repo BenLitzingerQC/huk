@@ -550,13 +550,14 @@ def plot_pr_value_landscape(
 
     ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
 
+    errorbar_container = None
     if precision_se is not None:
         recall_arr = np.asarray(recall, dtype=float)
         prec_arr = np.asarray(precision, dtype=float)
         se_arr = np.asarray(precision_se, dtype=float)
         lower_err = prec_arr - np.clip(prec_arr - ci_z * se_arr, 0, 1)
         upper_err = np.clip(prec_arr + ci_z * se_arr, 0, 1) - prec_arr
-        ax.errorbar(
+        errorbar_container = ax.errorbar(
             recall_arr,
             prec_arr,
             yerr=np.vstack([lower_err, upper_err]),
@@ -567,6 +568,7 @@ def plot_pr_value_landscape(
             capthick=1.0,
             alpha=0.8,
             zorder=3,
+            label=f"±{ci_z:g}·SE (95% CI)",
         )
     dot_colors = []
     for i in range(len(steps)):
@@ -655,23 +657,15 @@ def plot_pr_value_landscape(
         mpatches.Patch(color="#4daf4a", alpha=0.6, label="Profit zone"),
         mpatches.Patch(color=ACCENT, label="Optimum"),
     ]
-    if precision_se is not None:
-        legend_handles.append(
-            mpatches.Patch(
-                color=BLOOD_RED,
-                alpha=0.25,
-                label=f"±{ci_z:g}·SE (95% CI)",
-            )
-        )
+    if errorbar_container is not None:
+        legend_handles.append(errorbar_container)
     if has_evidence is not None and not all(has_evidence):
         legend_handles.append(
             mpatches.Patch(color=BLOOD_RED, label="No historic sample evidence"),
         )
     ax.legend(
         handles=legend_handles,
-        frameon=True,
-        facecolor="white",
-        edgecolor="#cccccc",
+        frameon=False,
         loc="lower left",
     )
     return fig, best_i
