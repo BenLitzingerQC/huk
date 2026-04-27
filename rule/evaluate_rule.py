@@ -246,15 +246,28 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
       - True positives — i.e. labeled positives caught by or_mask
     FPs are absent by construction (only positives are enriched).
     """
+    td_col = "TIME_DIFF_DAYS" if "TIME_DIFF_DAYS" in enriched.columns else "time_diff_days"
+    or_col = "OR_MASK" if "OR_MASK" in enriched.columns else "or_mask"
+    sav_col = "MIN_MAX_REIMBURSEMENT"
+
+    logging.info(
+        f"plot_savings_by_time_difference: columns={enriched.columns}, "
+        f"td_col={td_col}, or_col={or_col}"
+    )
+
     df = enriched.with_columns(
-        (pl.col("HUKIMPORTTIME") - pl.col("HUKIMPORTTIME__2"))
-        .dt.total_days()
-        .alias("time_difference")
+        pl.col(td_col).cast(pl.Int64, strict=False).alias("time_difference"),
+        pl.col(sav_col).cast(pl.Float64, strict=False),
     ).filter(
         pl.col("time_difference").is_not_null(),
         pl.col("time_difference").gt(0),
         pl.col("time_difference").lt(730),
-        pl.col("MIN_MAX_REIMBURSEMENT").is_not_null(),
+        pl.col(sav_col).is_not_null(),
+    )
+
+    logging.info(
+        f"plot_savings_by_time_difference: {df.height} rows after filter "
+        f"(of {enriched.height} enriched)"
     )
 
     bin_width = 14
@@ -266,14 +279,14 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
         return (
             d.group_by("td_bin")
             .agg(
-                pl.col("MIN_MAX_REIMBURSEMENT").mean().alias("avg_savings"),
+                pl.col(sav_col).mean().alias("avg_savings"),
                 pl.len().alias("n"),
             )
             .sort("td_bin")
         )
 
     all_pos = _binned_mean(df)
-    tp_only = _binned_mean(df.filter(pl.col("OR_MASK").cast(pl.Boolean)))
+    tp_only = _binned_mean(df.filter(pl.col(or_col).cast(pl.Boolean)))
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -298,6 +311,10 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
 
     ax.set_xlabel("Time difference in days (Doc. 1 − Doc. 2), binned")
     ax.set_ylabel("Avg. MIN_MAX_REIMBURSEMENT (€)")
+    ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f"{x:,.0f} €".replace(",", "."))
+    )
     ax.set_title(
         "Average DZ savings per time difference",
         loc="left", fontweight="bold", pad=25,
@@ -338,6 +355,12 @@ def savings_analysis(data: pl.DataFrame, label_col: str):
     savings_per_tp estimate for the PR-value landscape.
     """
     data = data.drop(["LAR", "LAR__2"])
+    data = data.with_columns(
+        (pl.col("HUKIMPORTTIME") - pl.col("HUKIMPORTTIME__2"))
+        .dt.total_days()
+        .cast(pl.Int32)
+        .alias("TIME_DIFF_DAYS")
+    )
     positives = data.filter(pl.col(label_col).cast(pl.Boolean).fill_null(False))
 
     conn_sw = get_engine(database="spielwiese")
@@ -814,6 +837,10 @@ def plot_expected_savings(
     )
 
     ax.axhline(0, color="#888888", linewidth=0.8, linestyle="--", zorder=1)
+    ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f"{x:,.0f} €".replace(",", "."))
+    )
     ax.set_xlabel("Number of OR-rules (m)")
     ax.set_ylabel("Expected net value (€)")
     ax.set_title(
