@@ -3,7 +3,9 @@ import logging
 import numpy as np
 import polars as pl
 
-from historic_sampling import HISTORIC_UNLABELED_FILTER
+LABELED_DOC2 = pl.col("HUKIMPORTTIME__2").ge(pl.datetime(2025, 10, 1)) & pl.col(
+    "HUKIMPORTTIME__2"
+).lt(pl.datetime(2025, 12, 25))
 
 
 def _first_hit_from_masks(and_masks):
@@ -21,9 +23,7 @@ def estimate_historic_precision(and_masks, data, label_col):
     `data` and each mask in `and_masks` must be aligned (same length).
     Restricts to HISTORIC_UNLABELED_FILTER rows before stratifying.
     """
-    historic_mask = (
-        data.select(HISTORIC_UNLABELED_FILTER.alias("m")).to_series().to_numpy()
-    )
+    historic_mask = data.select((~LABELED_DOC2).alias("m")).to_series().to_numpy()
     logging.info(f"historic_precision: {historic_mask.sum()} rows in unlabeled historic window")
     and_masks_hist = [m.to_numpy()[historic_mask] for m in and_masks]
     stratum = _first_hit_from_masks(and_masks_hist)
@@ -81,3 +81,67 @@ def cumulative_precision(per_k):
             "SE_m": float(np.sqrt(np.sum(w**2 * se**2))),
         })
     return pl.DataFrame(rows)
+
+
+def labeled_cumulative_precision(and_masks, data, label_col):
+    """Exact cumulative precision on the labeled subset (complement of HISTORIC_UNLABELED_FILTER).
+
+    Returns DataFrame: m | N_lab_m | TP_lab_m | P_lab_m.
+    Null labels are treated as False.
+    """
+    labeled_mask = data.select(LABELED_DOC2.alias("m")).to_series().to_numpy()
+    labels = (
+        data.select(pl.col(label_col).cast(pl.Boolean).fill_null(False))
+        .to_series()
+        .to_numpy()
+    )
+    labels_lab = labels[labeled_mask]
+    logging.info(f"labeled_cumulative_precision: {labeled_mask.sum()} labeled rows")
+
+    cum_or = np.zeros(labeled_mask.sum(), dtype=bool)
+    rows = []
+    for m, mask in enumerate(and_masks, start=1):
+        m_arr = mask.to_numpy() if isinstance(mask, pl.Series) else mask
+        cum_or = cum_or | m_arr[labeled_mask]
+        n_lab = int(cum_or.sum())
+        tp_lab = int((cum_or & labels_lab).sum())
+        rows.append({
+            "m": m,
+            "N_lab_m": n_lab,
+            "TP_lab_m": tp_lab,
+            "P_lab_m": tp_lab / n_lab if n_lab > 0 else None,
+        })
+    return pl.DataFrame(rows)
+
+
+def combined_precision(labeled_cum, historic_cum):
+    """Combines exact labeled precision with estimated historic precision.
+
+    P_combined_m = (N_lab_m · P_lab_m + N_hist_m · P_hat_hist_m) / (N_lab_m + N_hist_m)
+    SE_combined_m = (N_hist_m / (N_lab_m + N_hist_m)) · SE_hat_hist_m
+
+    Labeled counts are exact (zero variance); only the historic estimator contributes SE.
+    If a stratum has no historic sample (SE_hat is null), we fall back to labeled-only
+    for that m — i.e. P_combined = P_lab, SE = 0 — which is honest about what we know.
+    """
+    joined = labeled_cum.join(historic_cum, on="m", how="inner").with_columns(
+        (pl.col("N_lab_m") + pl.col("N_1_to_m")).alias("N_total_m"),
+    )
+    joined = joined.with_columns(
+        pl.when(pl.col("P_hat_m").is_not_null())
+        .then(
+            (
+                pl.col("N_lab_m") * pl.col("P_lab_m")
+                + pl.col("N_1_to_m") * pl.col("P_hat_m")
+            )
+            / pl.col("N_total_m")
+        )
+        .otherwise(pl.col("P_lab_m"))
+        .alias("P_combined_m"),
+        pl.when(pl.col("SE_m").is_not_null())
+        .then((pl.col("N_1_to_m") / pl.col("N_total_m")) * pl.col("SE_m"))
+        .otherwise(0.0)
+        .alias("SE_combined_m"),
+        pl.col("P_hat_m").is_not_null().alias("has_historic_evidence"),
+    )
+    return joined
