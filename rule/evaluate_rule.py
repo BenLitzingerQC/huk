@@ -308,7 +308,13 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
         transform=ax.transAxes, fontsize=10, ha="left", va="bottom",
     )
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, loc="best")
+    ax.legend(
+        frameon=True,
+        facecolor="white",
+        edgecolor="#cccccc",
+        framealpha=0.95,
+        loc="best",
+    )
 
     return fig
 
@@ -742,7 +748,10 @@ def plot_pr_value_landscape(
         )
     ax.legend(
         handles=legend_handles,
-        frameon=False,
+        frameon=True,
+        facecolor="white",
+        edgecolor="#cccccc",
+        framealpha=0.95,
         loc="lower left",
     )
     return fig, best_i
@@ -826,7 +835,14 @@ def plot_expected_savings(
         legend_handles.append(
             mpatches.Patch(color=BLOOD_RED, label="No historic sample evidence"),
         )
-    ax.legend(handles=legend_handles, frameon=False, loc="best")
+    ax.legend(
+        handles=legend_handles,
+        frameon=True,
+        facecolor="white",
+        edgecolor="#cccccc",
+        framealpha=0.95,
+        loc="best",
+    )
 
     return fig
 
