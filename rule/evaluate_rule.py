@@ -350,6 +350,110 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
     return fig
 
 
+def filter_by_min_reimbursement(
+    data: pl.DataFrame, threshold: float, mask_col: str = "or_mask"
+) -> pl.DataFrame:
+    """
+    Drops pairs where min(MAX_REIMBURSEMENT, MAX_REIMBURSEMENT__2) ≤ threshold.
+
+    Only rows with `mask_col == True` (positive predictions) are checked against
+    the DB — non-flagged rows pass through unchanged since they are never
+    proposed for review.
+    """
+    if threshold is None or threshold <= 0:
+        return data
+
+    conn_sw = get_engine(database="spielwiese")
+    raw_ids = ["StackID", "DocID", "SubDocID", "StackID__2", "DocID__2", "SubDocID__2"]
+
+    data_with_order = data.with_row_index("row_order")
+    pos_preds = data_with_order.filter(pl.col(mask_col).cast(pl.Boolean))
+    logging.info(
+        f"filter_by_min_reimbursement: input rows={data.height}, "
+        f"pos_preds={pos_preds.height}, threshold={threshold}"
+    )
+
+    if pos_preds.height == 0:
+        return data
+
+    with conn_sw.begin() as conn:
+        try:
+            conn.execute(text("DROP TABLE DA00249.TEMP_DZ_FILTER"))
+        except Exception as e:
+            logging.info(f"filter_by_min_reimbursement: no table to drop (expected): {e}")
+
+    pos_preds.select(["row_order", *raw_ids]).write_database(
+        table_name="DA00249.TEMP_DZ_FILTER",
+        connection=conn_sw,
+        engine_options={"dtype": {c: VARCHAR(length=50) for c in raw_ids}},
+    )
+
+    with conn_sw.connect() as conn:
+        conn.execute(
+            text('CREATE INDEX idx_f_ids ON DA00249.TEMP_DZ_FILTER ("StackID", "DocID", "SubDocID")')
+        )
+        conn.execute(
+            text('CREATE INDEX idx_f_ids_2 ON DA00249.TEMP_DZ_FILTER ("StackID__2", "DocID__2", "SubDocID__2")')
+        )
+        conn.commit()
+
+    enriched = pl.read_database(
+        query="""
+            SELECT t."row_order",
+                   h1.MAX_REIMBURSEMENT AS R1,
+                   h2.MAX_REIMBURSEMENT AS R2
+            FROM DA00249.TEMP_DZ_FILTER t
+            LEFT JOIN (
+                SELECT STACKID, DOCID, SUBDOCID, MAX_REIMBURSEMENT FROM CUR.VW_MF_PKL_DA_HANDLER_DATA
+                WHERE (STACKID, DOCID, SUBDOCID) IN (
+                    SELECT "StackID", "DocID", "SubDocID" FROM DA00249.TEMP_DZ_FILTER
+                )
+            ) h1 ON t."StackID"=h1.STACKID AND t."DocID"=h1.DOCID AND t."SubDocID"=h1.SUBDOCID
+            LEFT JOIN (
+                SELECT STACKID, DOCID, SUBDOCID, MAX_REIMBURSEMENT FROM CUR.VW_MF_PKL_DA_HANDLER_DATA
+                WHERE (STACKID, DOCID, SUBDOCID) IN (
+                    SELECT "StackID__2", "DocID__2", "SubDocID__2" FROM DA00249.TEMP_DZ_FILTER
+                )
+            ) h2 ON t."StackID__2"=h2.STACKID AND t."DocID__2"=h2.DOCID AND t."SubDocID__2"=h2.SUBDOCID
+        """,
+        connection=conn_sw,
+    )
+
+    row_order_col = next(c for c in enriched.columns if c.lower() == "row_order")
+    r1_col = next(c for c in enriched.columns if c.upper() == "R1")
+    r2_col = next(c for c in enriched.columns if c.upper() == "R2")
+
+    enriched = enriched.with_columns(
+        pl.min_horizontal(r1_col, r2_col).alias("_min_reimb")
+    ).rename({row_order_col: "row_order"})
+
+    n_no_match = int(enriched["_min_reimb"].is_null().sum())
+    if n_no_match > 0:
+        logging.warning(
+            f"filter_by_min_reimbursement: {n_no_match} of {pos_preds.height} "
+            f"pos-pred pairs had NO MAX_REIMBURSEMENT in DB — kept by default"
+        )
+
+    joined = data_with_order.join(
+        enriched.select(["row_order", "_min_reimb"]),
+        on="row_order",
+        how="left",
+    )
+    # Drop only flagged rows that have a reimbursement ≤ threshold.
+    # Unflagged rows and flagged rows without DB match pass through.
+    kept = joined.filter(
+        ~pl.col(mask_col).cast(pl.Boolean)
+        | pl.col("_min_reimb").is_null()
+        | pl.col("_min_reimb").gt(threshold)
+    ).drop(["row_order", "_min_reimb"])
+    logging.info(
+        f"filter_by_min_reimbursement: kept {kept.height} of {data.height} rows "
+        f"(dropped {data.height - kept.height} flagged pairs below threshold, "
+        f"{n_no_match} no-match kept)"
+    )
+    return kept
+
+
 def savings_analysis(data: pl.DataFrame, label_col: str):
     """
     Fetches MAX_REIMBURSEMENT for all positives (label=True) in one DB round-trip,
@@ -968,6 +1072,7 @@ def evaluate_rule(
     label_col: str,
     data_path: Path,
     review_cost: float,
+    min_reimbursement_threshold: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
     """
     Evaluates greedy and final rule sets on two time windows.
@@ -993,6 +1098,9 @@ def evaluate_rule(
         data = base_data.filter(window_filter).with_columns(
             pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
             pl.any_horizontal(comp).alias("or_mask"),
+        )
+        data = filter_by_min_reimbursement(
+            data, min_reimbursement_threshold, mask_col="or_mask"
         )
 
         savings_result = savings_analysis(data, label_col)
@@ -1020,7 +1128,7 @@ def evaluate_rule(
         )
 
         data_optimum_rule = filter_data_to_best_rules(
-            base_data.filter(window_filter), comp, label_col, best_i
+            data, comp, label_col, best_i
         )
 
         lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
