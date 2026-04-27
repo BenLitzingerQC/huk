@@ -9,9 +9,6 @@ import numpy as np
 import polars as pl
 import seaborn as sns
 from da_hf5_utils.db2 import get_engine
-from sqlalchemy import text
-from sqlalchemy.types import VARCHAR
-
 from historic_precision import (
     combined_precision,
     cumulative_precision,
@@ -19,6 +16,8 @@ from historic_precision import (
     expected_savings_curve,
     labeled_cumulative_precision,
 )
+from sqlalchemy import text
+from sqlalchemy.types import VARCHAR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -239,14 +238,17 @@ def generate_time_difference_plot(data):
 
 
 def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
-    """Average MIN_MAX_REIMBURSEMENT binned by |Doc.1 − Doc.2| days.
+    """
+    Average MIN_MAX_REIMBURSEMENT binned by |Doc.1 − Doc.2| days.
 
     Two lines on the same axis:
       - All labeled positives (true DZ distribution)
       - True positives — i.e. labeled positives caught by or_mask
     FPs are absent by construction (only positives are enriched).
     """
-    td_col = "TIME_DIFF_DAYS" if "TIME_DIFF_DAYS" in enriched.columns else "time_diff_days"
+    td_col = (
+        "TIME_DIFF_DAYS" if "TIME_DIFF_DAYS" in enriched.columns else "time_diff_days"
+    )
     or_col = "OR_MASK" if "OR_MASK" in enriched.columns else "or_mask"
     sav_col = "MIN_MAX_REIMBURSEMENT"
 
@@ -270,7 +272,7 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
         f"(of {enriched.height} enriched)"
     )
 
-    bin_width = 14
+    bin_width = 60
     df = df.with_columns(
         (pl.col("time_difference") // bin_width * bin_width).alias("td_bin")
     )
@@ -298,14 +300,20 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
     ax.plot(
         all_pos["td_bin"].to_numpy(),
         all_pos["avg_savings"].to_numpy(),
-        color=GREEN, linewidth=1.4, marker="o", markersize=4,
+        color=GREEN,
+        linewidth=1.4,
+        marker="o",
+        markersize=4,
         label="All labeled positives",
     )
     if not tp_only.is_empty():
         ax.plot(
             tp_only["td_bin"].to_numpy(),
             tp_only["avg_savings"].to_numpy(),
-            color=ACCENT, linewidth=1.4, marker="o", markersize=4,
+            color=ACCENT,
+            linewidth=1.4,
+            marker="o",
+            markersize=4,
             label="True positives (rule hits)",
         )
 
@@ -317,12 +325,18 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
     )
     ax.set_title(
         "Average DZ savings per time difference",
-        loc="left", fontweight="bold", pad=25,
+        loc="left",
+        fontweight="bold",
+        pad=25,
     )
     ax.text(
-        x=0, y=1.02,
+        x=0,
+        y=1.02,
         s=f"Bin width={bin_width}d, {_window_name_to_subtitle(window_name)}",
-        transform=ax.transAxes, fontsize=10, ha="left", va="bottom",
+        transform=ax.transAxes,
+        fontsize=10,
+        ha="left",
+        va="bottom",
     )
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(
@@ -806,6 +820,7 @@ def plot_expected_savings(
     ci_z=1.96,
 ):
     """Expected net value per rule count m with ±CI, using the combined estimator."""
+    combined_with_nv = combined_with_nv.head(20)
     m_vals = combined_with_nv["m"].to_numpy()
     nv = combined_with_nv["NV_est_m"].to_numpy()
     se = combined_with_nv["SE_NV_m"].to_numpy()
@@ -816,23 +831,39 @@ def plot_expected_savings(
     lower = nv - ci_z * se
     upper = nv + ci_z * se
 
-    ax.fill_between(m_vals, lower, upper, color=BLOOD_RED, alpha=0.2, linewidth=0, zorder=2)
+    ax.fill_between(
+        m_vals, lower, upper, color=BLOOD_RED, alpha=0.2, linewidth=0, zorder=2
+    )
     ax.plot(m_vals, nv, color="#333333", linewidth=1.2, zorder=3)
 
     dot_colors = [BLOOD_RED if not e else "#333333" for e in has_ev]
-    ax.scatter(m_vals, nv, c=dot_colors, s=35, zorder=4, edgecolors="white", linewidths=1)
+    ax.scatter(
+        m_vals, nv, c=dot_colors, s=35, zorder=4, edgecolors="white", linewidths=1
+    )
 
     best_i = int(np.argmax(nv))
     ax.scatter(
-        [m_vals[best_i]], [nv[best_i]],
-        color=ACCENT, s=120, zorder=5, edgecolors="white", linewidths=1.5,
+        [m_vals[best_i]],
+        [nv[best_i]],
+        color=ACCENT,
+        s=120,
+        zorder=5,
+        edgecolors="white",
+        linewidths=1.5,
     )
     ax.annotate(
-        f"Optimum m={m_vals[best_i]}\nNV={nv[best_i]/1000:.1f}K €",
+        f"Optimum m={m_vals[best_i]}\nNV={nv[best_i] / 1000:.1f}K €",
         xy=(m_vals[best_i], nv[best_i]),
-        xytext=(10, 10), textcoords="offset points",
-        fontsize=9, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#999999", linewidth=0.8),
+        xytext=(10, 10),
+        textcoords="offset points",
+        fontsize=9,
+        fontweight="bold",
+        bbox=dict(
+            boxstyle="round,pad=0.3",
+            facecolor="white",
+            edgecolor="#999999",
+            linewidth=0.8,
+        ),
         arrowprops=dict(arrowstyle="->", color="black", linewidth=1),
     )
 
@@ -845,12 +876,18 @@ def plot_expected_savings(
     ax.set_ylabel("Expected net value (€)")
     ax.set_title(
         "Expected net value per rule count (labeled + historic-estimated)",
-        loc="left", fontweight="bold", pad=25,
+        loc="left",
+        fontweight="bold",
+        pad=25,
     )
     ax.text(
-        x=0, y=1.02,
+        x=0,
+        y=1.02,
         s=f"Review cost={review_cost:.2f} €, Avg. saving per DZ={avg_savings_per_dz:.2f} €, {_window_name_to_subtitle(window_name)}",
-        transform=ax.transAxes, fontsize=10, ha="left", va="bottom",
+        transform=ax.transAxes,
+        fontsize=10,
+        ha="left",
+        va="bottom",
     )
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -886,7 +923,9 @@ def historic_estimated_plot(
     avg_savings_per_dz,
     window_name,
 ):
-    """Builds the historic-window PR plot with hits-weighted precision (labeled exact + historic estimated) plus error bars.
+    """
+    Builds the historic-window PR plot with hits-weighted precision (labeled exact +
+    historic estimated) plus error bars.
 
     Returns (pr_fig, nv_fig).
     """
@@ -932,19 +971,6 @@ def evaluate_rule(
 ) -> dict[str, dict[str, Any]]:
     """
     Evaluates greedy and final rule sets on two time windows.
-    Args:
-
-
-    Returns
-    -------
-    {
-        "November_2025__October_2025": {
-            "greedy": { "prec_rec", "pr_value", "lar_heatmap",
-                        "time_difference", "savings", "in_stack_stats", ... },
-            "final":  { ... },
-        },
-        "November_2025__2_years_historic": { ... },
-    }
     """
     # Compute savings_per_tp once from all positives over the full base filter
     logging.info("Starting to read data.")
@@ -955,82 +981,82 @@ def evaluate_rule(
     for window_name, window_filter in EVAL_WINDOWS:
         return_dict[window_name] = {}
 
-        for comp_name, rules in [("greedy", greedy_rules), ("final", final_rules)]:
-            comp = [
-                pl.all_horizontal(
-                    [pl.col(c).cast(pl.Boolean).fill_null(False) for c in rule]
-                )
-                for rule in rules
-            ]
-
-            data = base_data.filter(window_filter).with_columns(
-                pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
-                pl.any_horizontal(comp).alias("or_mask"),
+        # for comp_name, rules in [("greedy", greedy_rules), ("final", final_rules)]:       
+    
+        comp = [
+            pl.all_horizontal(
+                [pl.col(c).cast(pl.Boolean).fill_null(False) for c in rule]
             )
+            for rule in greedy_rules
+        ]
 
-            savings_result = savings_analysis(data, label_col)
-            avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
+        data = base_data.filter(window_filter).with_columns(
+            pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
+            pl.any_horizontal(comp).alias("or_mask"),
+        )
 
-            prec_values, rec_values, num_pos_preds, and_masks = (
-                full_data_prec_rec_per_rule(data, label_col, comp)
-            )
+        savings_result = savings_analysis(data, label_col)
+        avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
 
-            total_pos = int(data["labels"].sum())
-            steps = list(range(1, len(prec_values) + 1))
+        prec_values, rec_values, num_pos_preds, and_masks = (
+            full_data_prec_rec_per_rule(data, label_col, comp)
+        )
 
-            in_stack_out_stack = in_stack_out_stack_analysis(data)
+        total_pos = int(data["labels"].sum())
+        steps = list(range(1, len(prec_values) + 1))
 
-            # Plots
-            pr_value_plot, best_i = plot_pr_value_landscape(
-                precision=prec_values,
-                recall=rec_values,
-                steps=steps,
-                num_pos_preds=num_pos_preds,
-                total_pos=total_pos,
-                review_cost=review_cost,
-                avg_savings_per_dz=avg_savings_per_dz,
-                window_name=window_name,
-            )
+        in_stack_out_stack = in_stack_out_stack_analysis(data)
 
-            data_optimum_rule = filter_data_to_best_rules(
-                base_data.filter(window_filter), comp, label_col, best_i
-            )
+        # Plots
+        pr_value_plot, best_i = plot_pr_value_landscape(
+            precision=prec_values,
+            recall=rec_values,
+            steps=steps,
+            num_pos_preds=num_pos_preds,
+            total_pos=total_pos,
+            review_cost=review_cost,
+            avg_savings_per_dz=avg_savings_per_dz,
+            window_name=window_name,
+        )
 
-            lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
-            time_diff_plot = generate_time_difference_plot(data_optimum_rule)
-            savings_td_plot = plot_savings_by_time_difference(
-                savings_result["enriched"], window_name
-            )
+        data_optimum_rule = filter_data_to_best_rules(
+            base_data.filter(window_filter), comp, label_col, best_i
+        )
 
-            result = {
-                "pr_value": pr_value_plot,
-                "lar_heatmap": lar_heatmap_plot,
-                "time_difference": time_diff_plot,
-                "savings_time_difference": savings_td_plot,
-                "savings_tp": savings_result["tp_only"],
-                "savings_all_pos": savings_result["all_pos"],
-                **in_stack_out_stack,
+        lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
+        time_diff_plot = generate_time_difference_plot(data_optimum_rule)
+        savings_td_plot = plot_savings_by_time_difference(
+            savings_result["enriched"], window_name
+        )
+
+        result = {
+            "pr_value": pr_value_plot,
+            "lar_heatmap": lar_heatmap_plot,
+            "time_difference": time_diff_plot,
+            "savings_time_difference": savings_td_plot,
+            "savings_tp": savings_result["tp_only"],
+            "savings_all_pos": savings_result["all_pos"],
+            **in_stack_out_stack,
+        }
+
+        return_dict[window_name]["greedy"] = result
+
+        pr_fig, nv_fig = historic_estimated_plot(
+            window_data=data,
+            and_masks=and_masks,
+            label_col=label_col,
+            rec_values=rec_values,
+            num_pos_preds=num_pos_preds,
+            steps=steps,
+            total_pos=total_pos,
+            review_cost=review_cost,
+            avg_savings_per_dz=avg_savings_per_dz,
+            window_name=window_name,
+        )
+        return_dict[window_name]["greedy_estimated"] = {
+            **result,
+            "pr_value": pr_fig,
+            "expected_savings": nv_fig,
             }
-
-            return_dict[window_name][comp_name] = result
-
-            if window_name == "November_2025__2_years_historic" and comp_name == "greedy":
-                pr_fig, nv_fig = historic_estimated_plot(
-                    window_data=data,
-                    and_masks=and_masks,
-                    label_col=label_col,
-                    rec_values=rec_values,
-                    num_pos_preds=num_pos_preds,
-                    steps=steps,
-                    total_pos=total_pos,
-                    review_cost=review_cost,
-                    avg_savings_per_dz=avg_savings_per_dz,
-                    window_name=window_name,
-                )
-                return_dict[window_name]["greedy_estimated"] = {
-                    **result,
-                    "pr_value": pr_fig,
-                    "expected_savings": nv_fig,
-                }
 
     return return_dict
