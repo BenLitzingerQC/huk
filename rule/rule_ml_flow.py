@@ -598,6 +598,7 @@ def build_runtime_config(cfg: dict) -> dict:
         "FLATFILE_TYPE": cfg["flatfile_type"],
         "IDENTIFIERS": identifiers,
         "REVIEW_COST": cfg["review_cost"],
+        "MIN_REIMBURSEMENT_THRESHOLD": cfg.get("min_reimbursement_threshold", 0),
         "ORIGIN_COL": cfg["origin"]["col"],
         **{k.upper(): v for k, v in cfg["learning"].items()},
     }
@@ -627,6 +628,7 @@ def main(cfg: DictConfig):
     MAX_CANDIDATES = built["MAX_CANDIDATES"]
     MERGE = built["MERGE"]
     REVIEW_COST = built["REVIEW_COST"]
+    MIN_REIMBURSEMENT_THRESHOLD = built["MIN_REIMBURSEMENT_THRESHOLD"]
 
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment("DZ_test")
@@ -733,7 +735,13 @@ def main(cfg: DictConfig):
         # Plot precision Recall curve
         setup_plotting()
         evaluation_dict = evaluate_rule(
-            selected_rules, final_rules, EVAL_FILTER, LABEL_COL, DATA_PATH, REVIEW_COST
+            selected_rules,
+            final_rules,
+            EVAL_FILTER,
+            LABEL_COL,
+            DATA_PATH,
+            REVIEW_COST,
+            min_reimbursement_threshold=MIN_REIMBURSEMENT_THRESHOLD,
         )
 
         for window_name, comp_dict in evaluation_dict.items():
