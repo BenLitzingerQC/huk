@@ -34,7 +34,15 @@ def estimate_historic_precision(and_masks, data, label_col):
         .filter(pl.col("stratum_k").ge(0))
     )
 
-    N_per_k = data.group_by("stratum_k").agg(pl.len().alias("N_k"))
+    all_strata = pl.DataFrame(
+        {"stratum_k": np.arange(len(and_masks), dtype=np.int32)}
+    )
+    N_per_k = (
+        data.group_by("stratum_k")
+        .agg(pl.len().alias("N_k"))
+        .join(all_strata, on="stratum_k", how="right")
+        .with_columns(pl.col("N_k").fill_null(0))
+    )
     labelled = data.filter(pl.col(label_col).is_not_null())
 
     per_k = (
