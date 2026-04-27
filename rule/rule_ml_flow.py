@@ -768,6 +768,16 @@ def main(cfg: DictConfig):
                 mlflow.log_figure(
                     plot_dict["time_difference"], f"{prefix}/time_difference.png"
                 )
+                if "savings_time_difference" in plot_dict:
+                    mlflow.log_figure(
+                        plot_dict["savings_time_difference"],
+                        f"{prefix}/savings_time_difference.png",
+                    )
+                if "expected_savings" in plot_dict:
+                    mlflow.log_figure(
+                        plot_dict["expected_savings"],
+                        f"{prefix}/expected_savings.png",
+                    )
 
         plt.close("all")
 
