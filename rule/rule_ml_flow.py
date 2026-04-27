@@ -122,38 +122,54 @@ def load_data(
     # Lar is needed because of OLD_DZ_RULE
     needed = pred_cols + [label_col, "lar", "lar__2", "HUKIMPORTTIME", "HUKIMPORTTIME__2", origin_col]
 
-    # Load with optional negative downsampling
+    # Load with optional unlabelled downsampling. Labelled rows (True OR False)
+    # are always kept; only unlabelled rows get downsampled so that the final
+    # positive rate equals `positive_rate`.
     if positive_rate is not None:
         stats = (
             pl.scan_parquet(path)
             .filter(filter_expr)
             .select(
                 pl.col(label_col).cast(pl.Int8).sum().alias("n_pos"),
+                (pl.col(label_col).is_not_null() & pl.col(label_col).cast(pl.Int8).eq(0))
+                .sum()
+                .alias("n_labeled_neg"),
+                pl.col(label_col).is_null().sum().alias("n_unlabeled"),
                 pl.len().alias("n_total"),
             )
             .collect()
         )
         n_pos = stats["n_pos"].item()
+        n_labeled_neg = stats["n_labeled_neg"].item()
+        n_unlabeled = stats["n_unlabeled"].item()
         n_total = stats["n_total"].item()
-        neg_want = int(n_pos * (1 - positive_rate) / positive_rate)
-        keep_every = max(1, (n_total - n_pos) // neg_want)
+
+        total_neg_want = int(n_pos * (1 - positive_rate) / positive_rate)
+        n_unlabeled_want = max(0, total_neg_want - n_labeled_neg)
+        keep_every = (
+            max(1, n_unlabeled // n_unlabeled_want) if n_unlabeled_want > 0 else None
+        )
+
+        unlabeled_keep_expr = (
+            pl.lit(False) if keep_every is None else (pl.col("_idx") % keep_every == 0)
+        )
 
         df = (
             pl.scan_parquet(path)
             .filter(filter_expr)
             .select(needed)
             .with_row_index("_idx")
-            .filter(
-                (pl.col(label_col).cast(pl.Int8).fill_null(0) == 1)
-                | (pl.col("_idx") % keep_every == 0)
-            )
+            .filter(pl.col(label_col).is_not_null() | unlabeled_keep_expr)
             .drop("_idx")
             .collect()
         )
         # shuffle=True required — sample(fraction=1.0) alone does NOT shuffle in Polars
         df = df.sample(fraction=1.0, seed=42, shuffle=True)
         logging.info(
-            f"Loaded {n_total:,} rows, sampled to {len(df):,} ({n_pos:,} positives)"
+            f"Loaded {n_total:,} rows "
+            f"(pos={n_pos:,}, labeled_neg={n_labeled_neg:,}, unlabeled={n_unlabeled:,}), "
+            f"sampled to {len(df):,} — target neg={total_neg_want:,}, "
+            f"unlabeled kept≈{n_unlabeled_want:,}"
         )
     else:
         df = pl.read_parquet(path, columns=needed).filter(filter_expr)
@@ -576,9 +592,10 @@ def build_runtime_config(cfg: dict) -> dict:
             pl.datetime(*[int(x) for x in train_end.split("-")])
         )
 
-    # Positives bypass the date filter, negatives must pass it
+    # Labelled rows (True or False) bypass the date filter; unlabelled rows
+    # must fall inside the training window.
     train_filter = base_filter & (
-        pl.col(label_col).cast(pl.Boolean).fill_null(False) | date_filter
+        pl.col(label_col).is_not_null() | date_filter
     )
 
     identifiers_map = {"dev": AggregationIdentifiers.dev()}
