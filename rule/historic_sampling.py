@@ -672,7 +672,7 @@ GREEDY_RULES = [
 DATA_PATH = Path(
     filepath_shared_folder
     / "dz/labelling/full_data_sets"
-    / "25_12_25_2y_historic_all_labels_without_unclear__20_04_2026_.parquet"
+    / "25_12_25_2y_historic_all_labels_without_unclear__25_04_2026_.parquet"
 )
 OUTPUT_EXCEL = Path(
     filepath_shared_folder
@@ -714,7 +714,7 @@ def fetch_vnr_mapping() -> pl.DataFrame:
     return df
 
 
-def _first_hit(rule_cols: list[str]) -> pl.Series:
+def _first_hit(rule_cols: list[str]) -> pl.Expr:
     """
     Returns a Series with the index of the FIRST True rule column per row, or -1.
 
