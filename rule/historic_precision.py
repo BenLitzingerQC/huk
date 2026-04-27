@@ -156,3 +156,32 @@ def combined_precision(labeled_cum, historic_cum):
         pl.col("P_hat_m").is_not_null().alias("has_historic_evidence"),
     )
     return joined
+
+
+def expected_savings_curve(combined, avg_savings_per_dz, review_cost):
+    """Expected net value per m using the combined (labeled + historic) estimator.
+
+    TP_est_m   = TP_lab_m + N_1_to_m · P_hat_m
+    NV_est_m   = TP_est_m · avg_savings − N_flagged_m · review_cost
+    SE_NV_m    = avg_savings · N_1_to_m · SE_m   (only P_hat_m is stochastic)
+
+    Where `N_hat_m` fell back to labeled-only (no historic evidence), the
+    historic term is dropped and SE is 0 — same honesty contract as combined_precision.
+    """
+    return combined.with_columns(
+        (
+            pl.col("TP_lab_m")
+            + pl.when(pl.col("P_hat_m").is_not_null())
+            .then(pl.col("N_1_to_m") * pl.col("P_hat_m"))
+            .otherwise(0.0)
+        ).alias("TP_est_m"),
+    ).with_columns(
+        (
+            pl.col("TP_est_m") * avg_savings_per_dz
+            - pl.col("N_total_m") * review_cost
+        ).alias("NV_est_m"),
+        pl.when(pl.col("SE_m").is_not_null())
+        .then(avg_savings_per_dz * pl.col("N_1_to_m") * pl.col("SE_m"))
+        .otherwise(0.0)
+        .alias("SE_NV_m"),
+    )
