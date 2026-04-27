@@ -12,7 +12,12 @@ from da_hf5_utils.db2 import get_engine
 from sqlalchemy import text
 from sqlalchemy.types import VARCHAR
 
-from historic_precision import cumulative_precision, estimate_historic_precision
+from historic_precision import (
+    combined_precision,
+    cumulative_precision,
+    estimate_historic_precision,
+    labeled_cumulative_precision,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -440,6 +445,9 @@ def _window_name_to_subtitle(window_name: str) -> str:
     return mapping.get(window_name, window_name)
 
 
+BLOOD_RED = "#b22222"
+
+
 def plot_pr_value_landscape(
     precision,
     recall,
@@ -452,6 +460,7 @@ def plot_pr_value_landscape(
     window_name=None,
     precision_se=None,
     ci_z=1.96,
+    has_evidence=None,
 ):
     """
     Precision-Recall curve on top of a € net-value heatmap.
@@ -539,11 +548,34 @@ def plot_pr_value_landscape(
         manual=[(0.5, be_prec)],
     )
 
+    if precision_se is not None:
+        recall_arr = np.asarray(recall, dtype=float)
+        prec_arr = np.asarray(precision, dtype=float)
+        se_arr = np.asarray(precision_se, dtype=float)
+        order = np.argsort(recall_arr)
+        lower = np.clip(prec_arr - ci_z * se_arr, 0, 1)
+        upper = np.clip(prec_arr + ci_z * se_arr, 0, 1)
+        ax.fill_between(
+            recall_arr[order],
+            lower[order],
+            upper[order],
+            color=BLOOD_RED,
+            alpha=0.25,
+            linewidth=0,
+            zorder=2,
+        )
+
     ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
-    dot_colors = [
-        ACCENT if i == best_i else ("#333333" if precision[i] >= be_prec else GREY)
-        for i in range(len(steps))
-    ]
+    dot_colors = []
+    for i in range(len(steps)):
+        if has_evidence is not None and not has_evidence[i]:
+            dot_colors.append(BLOOD_RED)
+        elif i == best_i:
+            dot_colors.append(ACCENT)
+        elif precision[i] >= be_prec:
+            dot_colors.append("#333333")
+        else:
+            dot_colors.append(GREY)
     ax.scatter(
         recall,
         precision,
@@ -553,14 +585,6 @@ def plot_pr_value_landscape(
         edgecolors="white",
         linewidths=1,
     )
-
-    if precision_se is not None:
-        ax.errorbar(
-            recall, precision,
-            yerr=[ci_z * se for se in precision_se],
-            fmt="none", ecolor="#333333", elinewidth=0.8,
-            capsize=3, zorder=3,
-        )
 
     bbox_props = dict(boxstyle="round,pad=0.2", fc="lightgrey", ec="none", alpha=0.8)
     for r, p, n in zip(recall, precision, num_pos_preds):
@@ -625,11 +649,24 @@ def plot_pr_value_landscape(
         va="bottom",
     )
     ax.spines[["top", "right"]].set_visible(False)
+    legend_handles = [
+        mpatches.Patch(color="#4daf4a", alpha=0.6, label="Profit zone"),
+        mpatches.Patch(color=ACCENT, label="Optimum"),
+    ]
+    if precision_se is not None:
+        legend_handles.append(
+            mpatches.Patch(
+                color=BLOOD_RED,
+                alpha=0.25,
+                label=f"±{ci_z:g}·SE (95% CI)",
+            )
+        )
+    if has_evidence is not None and not all(has_evidence):
+        legend_handles.append(
+            mpatches.Patch(color=BLOOD_RED, label="No historic sample evidence"),
+        )
     ax.legend(
-        handles=[
-            mpatches.Patch(color="#4daf4a", alpha=0.6, label="Profit zone"),
-            mpatches.Patch(color=ACCENT, label="Optimum"),
-        ],
+        handles=legend_handles,
         frameon=True,
         facecolor="white",
         edgecolor="#cccccc",
@@ -668,14 +705,18 @@ def historic_estimated_plot(
     avg_savings_per_dz,
     window_name,
 ):
-    """Builds the historic-window PR plot with estimated precision + error bars."""
+    """Builds the historic-window PR plot with hits-weighted precision (labeled exact + historic estimated) plus error bars."""
     per_k = estimate_historic_precision(and_masks, window_data, label_col)
-    cum = cumulative_precision(per_k)
-    p_hat = cum["P_hat_m"].to_list()[: len(rec_values)]
-    se_hat = cum["SE_m"].to_list()[: len(rec_values)]
+    historic_cum = cumulative_precision(per_k)
+    labeled_cum = labeled_cumulative_precision(and_masks, window_data, label_col)
+    combined = combined_precision(labeled_cum, historic_cum)
+
+    p_combined = combined["P_combined_m"].to_list()[: len(rec_values)]
+    se_combined = combined["SE_combined_m"].to_list()[: len(rec_values)]
+    has_evidence = combined["has_historic_evidence"].to_list()[: len(rec_values)]
 
     fig, _ = plot_pr_value_landscape(
-        precision=p_hat,
+        precision=p_combined,
         recall=rec_values,
         steps=steps,
         num_pos_preds=num_pos_preds,
@@ -683,7 +724,8 @@ def historic_estimated_plot(
         review_cost=review_cost,
         avg_savings_per_dz=avg_savings_per_dz,
         window_name=window_name,
-        precision_se=se_hat,
+        precision_se=se_combined,
+        has_evidence=has_evidence,
     )
     return fig
 
