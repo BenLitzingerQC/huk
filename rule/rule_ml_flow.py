@@ -7,13 +7,15 @@ recall. Each row in the dataset has pre-computed boolean predicate columns
 
 Pipeline:
   1. Load parquet with boolean predicate columns
-  2. Apriori: generate candidate AND-rules (bottom-up, anti-monotone pruning)
+  2. Candidate rule generation: generate candidate AND-rules (bottom-up, anti-monotone pruning)
   3. Greedy: iteratively select rules by marginal composition precision
   4. Post-process: remove subsumed rules, remove redundant rules, merge
   5. Evaluate on train / test
 """
 
 import logging
+from polars.series.series import Series
+from polars.series.series import Series
 import sys
 from collections import Counter
 from itertools import combinations
@@ -54,9 +56,9 @@ THRESHOLD_FAMILIES = {
 }
 
 # Derived lookups (built once at import time)
-LOOSENESS = {}  # threshold string → int
-THRESHOLD_TO_FAMILY = {}  # threshold string → family name
-ALL_THRESHOLDS = []  # all thresholds, longest first (for prefix matching)
+LOOSENESS: dict[str, int] = {}  # threshold string → int
+THRESHOLD_TO_FAMILY: dict[str, str] = {}  # threshold string → family name
+ALL_THRESHOLDS: list[str] = []  # all thresholds, longest first (for prefix matching)
 
 for _family, _thresholds in THRESHOLD_FAMILIES.items():
     for _i, _t in enumerate(_thresholds):
@@ -69,7 +71,7 @@ ALL_THRESHOLDS.sort(key=len, reverse=True)
 # --- Data loading ----------------------------------------------------------------
 
 
-def detect_feature_groups(columns, label_col):
+def detect_feature_groups(columns):
     """
     Auto-detect feature groups from column names like '{threshold}_{feature}'.
 
@@ -77,24 +79,21 @@ def detect_feature_groups(columns, label_col):
     stay in separate groups even for the same feature.
     Returns: list of (feature_name, [thresholds sorted by looseness])
     """
-    ignore = {label_col, "dz_interesting", "dz", "labelled", "reclaim_list", "da_rule"}
-    grouped: dict[Any, Any] = {}  # (feature, family) → [thresholds]
+    grouped: dict[tuple[str, str], list[str]] = {}  # (feature, family) → [thresholds]
 
     for col in columns:
-        if col in ignore:
-            continue
         for threshold in ALL_THRESHOLDS:
             if col.startswith(threshold + "_"):
-                feature = col[len(threshold) + 1 :]
+                feature: str = col[len(threshold) + 1 :]
                 if not feature:
                     break
-                family = THRESHOLD_TO_FAMILY.get(threshold, threshold)
+                family: str = THRESHOLD_TO_FAMILY.get(threshold, threshold)
                 grouped.setdefault((feature, family), []).append(threshold)
                 break
 
-    groups = []
+    groups: list[tuple[str, list[str]]] = []
     for (feature, _), thresholds in sorted(grouped.items()):
-        thresholds = sorted(set(thresholds), key=lambda t: LOOSENESS.get(t, 0))
+        thresholds: list[str] = sorted(set(thresholds), key=lambda t: LOOSENESS.get(t, 0))
         groups.append((feature, thresholds))
     return groups
 
@@ -104,8 +103,6 @@ def load_data(
     label_col,
     filter_expr,
     origin_col,
-    origin_weights,
-    origin_default_weight,
     positive_rate=None,
     test_split=None,
 ):
@@ -116,22 +113,21 @@ def load_data(
     and optionally: test_features, test_labels.
     """
 
-    schema_cols = pl.scan_parquet(path).collect_schema().names()
-    groups = detect_feature_groups(schema_cols, label_col)
-    pred_cols = [f"{t}_{feat}" for feat, thresholds in groups for t in thresholds]
-    # Lar is needed because of OLD_DZ_RULE
-    needed = pred_cols + [label_col, "lar", "lar__2", "HUKIMPORTTIME", "HUKIMPORTTIME__2", origin_col]
+    schema_cols: list[str] = pl.scan_parquet(path).collect_schema().names()
+    groups: list[tuple[str, list[str]]] = detect_feature_groups(schema_cols)
+    pred_cols: list[str] = [f"{t}_{feat}" for feat, thresholds in groups for t in thresholds]
+    # lar is needed because of OLD_DZ_RULE
+    needed: list[str] = pred_cols + [label_col, "lar", "lar__2", "HUKIMPORTTIME", "HUKIMPORTTIME__2", origin_col]
 
     # Load with optional unlabelled downsampling. Labelled rows (True OR False)
     # are always kept; only unlabelled rows get downsampled so that the final
-    # positive rate equals `positive_rate`.
     if positive_rate is not None:
-        stats = (
+        stats: pl.DataFrame = (
             pl.scan_parquet(path)
             .filter(filter_expr)
             .select(
                 pl.col(label_col).cast(pl.Int8).sum().alias("n_pos"),
-                (pl.col(label_col).is_not_null() & pl.col(label_col).cast(pl.Int8).eq(0))
+                (pl.col(label_col).is_not_null() & ~pl.col(label_col).cast(pl.Boolean))
                 .sum()
                 .alias("n_labeled_neg"),
                 pl.col(label_col).is_null().sum().alias("n_unlabeled"),
@@ -139,18 +135,18 @@ def load_data(
             )
             .collect()
         )
-        n_pos = stats["n_pos"].item()
-        n_labeled_neg = stats["n_labeled_neg"].item()
-        n_unlabeled = stats["n_unlabeled"].item()
-        n_total = stats["n_total"].item()
+        n_pos: int = stats["n_pos"].item()
+        n_labeled_neg: int = stats["n_labeled_neg"].item()
+        n_unlabeled: int = stats["n_unlabeled"].item()
+        n_total: int = stats["n_total"].item()
 
-        total_neg_want = int(n_pos * (1 - positive_rate) / positive_rate)
-        n_unlabeled_want = max(0, total_neg_want - n_labeled_neg)
-        keep_every = (
+        total_neg_want: int = int(n_pos * (1 - positive_rate) / positive_rate)
+        n_unlabeled_want: int = max(0, total_neg_want - n_labeled_neg)
+        keep_every: int | None = (
             max(1, n_unlabeled // n_unlabeled_want) if n_unlabeled_want > 0 else None
         )
 
-        unlabeled_keep_expr = (
+        unlabeled_keep_expr: pl.Expr = (
             pl.lit(False) if keep_every is None else (pl.col("_idx") % keep_every == 0)
         )
 
@@ -162,81 +158,73 @@ def load_data(
             .filter(pl.col(label_col).is_not_null() | unlabeled_keep_expr)
             .drop("_idx")
             .collect()
+            .sample(fraction=1.0, seed=42, shuffle=True)
         )
-        # shuffle=True required — sample(fraction=1.0) alone does NOT shuffle in Polars
-        df = df.sample(fraction=1.0, seed=42, shuffle=True)
+
+        unlabeled_kept: int = min(n_unlabeled_want, n_unlabeled)
         logging.info(
             f"Loaded {n_total:,} rows "
             f"(pos={n_pos:,}, labeled_neg={n_labeled_neg:,}, unlabeled={n_unlabeled:,}), "
             f"sampled to {len(df):,} — target neg={total_neg_want:,}, "
-            f"unlabeled kept≈{n_unlabeled_want:,}"
+            f"unlabeled kept≈{unlabeled_kept:,}"
         )
     else:
-        df = pl.read_parquet(path, columns=needed).filter(filter_expr)
+        df: pl.DataFrame = pl.read_parquet(path, columns=needed).filter(filter_expr)
         logging.info(f"Loaded {len(df):,} rows")
 
-    def to_bool(frame):
-        labels = frame[label_col].cast(pl.Boolean).fill_null(False)
-        features = {c: frame[c].cast(pl.Boolean).fill_null(False) for c in pred_cols}
-        weights = (
-            frame[origin_col]
-            .fill_null("")
-            .map_elements(
-                lambda o: origin_weights.get(o, origin_default_weight),
-                return_dtype=pl.Float32,
-            )
-        )
-        return features, labels, weights
+    def _to_bool(frame: pl.DataFrame) -> tuple[dict[str, pl.Series], pl.Series]:
+        features: dict[str, pl.Series] = {c: frame[c].cast(pl.Boolean).fill_null(False) for c in pred_cols}
+        labels: pl.Series  = frame[label_col].cast(pl.Boolean).fill_null(False)
+        return features, labels
 
-    result = {"groups": groups}
+    result: dict[str, Any] = {"groups": groups}
 
     if test_split and test_split > 0:
-        pos_df = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) == 1)
-        neg_df = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) != 1)
-        n_pos_train = int(len(pos_df) * (1 - test_split))
-        n_neg_train = int(len(neg_df) * (1 - test_split))
+        pos_df: pl.DataFrame = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) == 1)
+        neg_df: pl.DataFrame = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) != 1)
+        n_pos_train: int = int(len(pos_df) * (1 - test_split))
+        n_neg_train: int = int(len(neg_df) * (1 - test_split))
 
-        train = pl.concat([pos_df.head(n_pos_train), neg_df.head(n_neg_train)])
-        train = train.sample(fraction=1.0, seed=42, shuffle=True)
-        test = pl.concat(
+        train: pl.DataFrame = pl.concat(
+            [pos_df.head(n_pos_train), neg_df.head(n_neg_train)]
+        ).sample(fraction=1.0, seed=42, shuffle=True)
+        test: pl.DataFrame = pl.concat(
             [
                 pos_df.tail(len(pos_df) - n_pos_train),
                 neg_df.tail(len(neg_df) - n_neg_train),
             ]
         ).sample(fraction=1.0, seed=43, shuffle=True)
 
-        result["features"], result["labels"], result["weights"] = to_bool(train)
-        result["test_features"], result["test_labels"], result["test_weights"] = (
-            to_bool(test)
-        )
-        n_tr = int(result["labels"].sum())
-        n_te = int(result["test_labels"].sum())
+        result["features"], result["labels"] = _to_bool(train)
+        result["test_features"], result["test_labels"] = _to_bool(test)
+        n_tr: int = int(result["labels"].sum())
+        n_te: int = int(result["test_labels"].sum())
         logging.info(
             f"Split: train={len(train):,} ({n_tr:,} pos), test={len(test):,} ({n_te:,} pos)"
         )
     else:
-        result["features"], result["labels"], result["weights"] = to_bool(df)
+        result["features"], result["labels"] = _to_bool(df)
         logging.info(f"Positives: {int(result['labels'].sum()):,}")
 
     logging.info(f"Predicates: {len(pred_cols)}, Groups: {len(groups)}")
     return result
 
 
-# --- Phase 1: Apriori candidate generation ---------------------------------------
+# --- Phase 1: Generate candidate rules ----------------------------------------
 
 
-def apriori_candidates(features, groups, labels, max_k, min_new_tp):
+def generate_candidate_rules(features, groups, labels, max_preds, min_new_tp):
     """
     Generate AND-rules bottom-up with anti-monotone TP pruning.
 
     Starts with single predicates that have TP >= 1, then combines predicates
-    from different feature groups up to max_k per rule.
+    from different feature groups up to max_preds per rule.
     Anti-monotone: adding AND-predicates can only decrease TP, so any rule
     with TP=0 is pruned along with all its extensions.
 
     Returns: list of (predicate_names, mask, precision, tp_count)
     """
-    predicates = [
+    predicates: list[tuple[int, str]] = [
         (gi, f"{t}_{feat}")
         for gi, (feat, thresholds) in enumerate(groups)
         for t in thresholds
@@ -245,7 +233,7 @@ def apriori_candidates(features, groups, labels, max_k, min_new_tp):
     # Level 1: single predicates with TP >= MIN_NEW_TP
     prev_level = []
     for gi, col in predicates:
-        mask = features[col]
+        mask: pl.Series = features[col]
         if int((mask & labels).sum()) >= min_new_tp:
             prev_level.append(((gi,), [col], mask))
 
@@ -258,10 +246,11 @@ def apriori_candidates(features, groups, labels, max_k, min_new_tp):
                 scored.append((names, mask, tp / pos, tp))
         return scored
 
-    candidates = score(prev_level)
+    # Data structure of candidates: column_name, pl.Series of bool mask, recall, # tps
+    candidates: list[tuple[list[str], pl.Series, float, int]] = score(prev_level)
 
-    # Extend level by level up to max_k
-    for _ in tqdm(range(2, max_k + 1), desc="apriori"):
+    # Extend level by level up to max_preds
+    for _ in tqdm(range(2, max_preds + 1), desc="Generate candidate rules"):
         next_level = []
         for group_ids, names, mask in prev_level:
             for gi, col in predicates:
@@ -281,10 +270,8 @@ def apriori_candidates(features, groups, labels, max_k, min_new_tp):
 
 def diversity_filter(candidates, max_count):
     """
-    Keep top N/2 by precision + top N/2 by TP count (deduplicated).
-
-    Preserves both precise rules (for composition quality) and high-coverage rules (for
-    reaching the recall target).
+    Only needed if max_rules < len(candidates).
+    Heuristically keeps top N/2 by precision + top N/2 by TP count (deduplicated).
     """
     if len(candidates) <= max_count:
         return candidates
@@ -308,7 +295,6 @@ def diversity_filter(candidates, max_count):
 def greedy_select(
     candidates,
     labels,
-    weights,
     total_positives,
     n_rows,
     min_recall,
@@ -345,7 +331,7 @@ def greedy_select(
         remaining = min_tp - cum_tp
         adaptive_min = max(min_new_tp, int(remaining * 0.01))
 
-        best_score = -1.0
+        best_score = -1
         best_idx = -1
         best_tp = 0
         best_pos = 0
@@ -355,7 +341,7 @@ def greedy_select(
         for ci in alive:
             _, mask, _, _ = candidates[ci]
             uncovered = mask & not_covered
-            new_tp = float((uncovered & labels).cast(pl.Float32).dot(weights))
+            new_tp = (uncovered & labels).sum()
 
             # Dead: can never contribute again (OR mask only grows)
             if new_tp < 1:
@@ -366,7 +352,7 @@ def greedy_select(
             if new_tp < adaptive_min:
                 continue
 
-            new_pos = float(uncovered.cast(pl.Float32).dot(weights))
+            new_pos = uncovered
             marginal_prec = (cum_tp + new_tp) / (cum_pos + new_pos)
 
             if marginal_prec > best_score:
@@ -613,8 +599,6 @@ def build_runtime_config(cfg: dict) -> dict:
         "IDENTIFIERS": identifiers,
         "REVIEW_COST": cfg["review_cost"],
         "ORIGIN_COL": cfg["origin"]["col"],
-        "ORIGIN_WEIGHTS": cfg["origin"]["weights"],
-        "ORIGIN_DEFAULT_WEIGHT": cfg["origin"]["default_weight"],
         **{k.upper(): v for k, v in cfg["learning"].items()},
     }
 
@@ -636,8 +620,6 @@ def main(cfg: DictConfig):
     FLATFILE_TYPE = built["FLATFILE_TYPE"]
     IDENTIFIERS = built["IDENTIFIERS"]
     ORIGIN_COL = built["ORIGIN_COL"]
-    ORIGIN_WEIGHTS = built["ORIGIN_WEIGHTS"]
-    ORIGIN_DEFAULT_WEIGHT = built["ORIGIN_DEFAULT_WEIGHT"]
     MAX_PREDICATES_PER_RULE = built["MAX_PREDICATES_PER_RULE"]
     MAX_RULES = built["MAX_RULES"]
     MIN_RECALL = built["MIN_RECALL"]
@@ -658,21 +640,18 @@ def main(cfg: DictConfig):
             LABEL_COL,
             FILTER,
             ORIGIN_COL,
-            ORIGIN_WEIGHTS,
-            ORIGIN_DEFAULT_WEIGHT,
             POSITIVE_RATE,
             TEST_SPLIT,
         )
         features, labels = data["features"], data["labels"]
-        weights = data["weights"]
         groups = data["groups"]
-        total_pos = float(labels.cast(pl.Float32).dot(weights))
-        n_rows = len(labels)
-        has_test = "test_features" in data
+        total_pos: int = int(labels.sum())
+        n_rows: int = len(labels)
+        has_test: bool = "test_features" in data
 
-        # Phase 1: Apriori
-        logging.info(f"\n--- Phase 1: Apriori (max_k={MAX_PREDICATES_PER_RULE}) ---")
-        candidates = apriori_candidates(
+        # Phase 1: Candidate rule generation
+        logging.info(f"\n--- Phase 1: Candidate rule generation (max_preds={MAX_PREDICATES_PER_RULE}) ---")
+        candidates = generate_candidate_rules(
             features, groups, labels, MAX_PREDICATES_PER_RULE, MIN_NEW_TP
         )
         n_before = len(candidates)
@@ -698,7 +677,6 @@ def main(cfg: DictConfig):
         ) = greedy_select(
             candidates,
             labels,
-            weights,
             total_pos,
             n_rows,
             MIN_RECALL,
@@ -782,20 +760,19 @@ def main(cfg: DictConfig):
         plt.close("all")
 
         gw = evaluation_dict["November_2025__October_2025"]["greedy"]
-        fw = evaluation_dict["November_2025__October_2025"]["final"]
+        # "Final" composition currently not of interest
+        # fw = evaluation_dict["November_2025__October_2025"]["final"]
 
         mlflow.log_params(
             {
                 "DATA_PATH": DATA_PATH,
-                "FILTER": str(raw_cfg.get("filter")),
+                "FILTER": FILTER,
                 "LABEL_COL": LABEL_COL,
                 "POSITIVE_RATE": POSITIVE_RATE,
                 "TEST_SPLIT": TEST_SPLIT,
                 "FLATFILE_TYPE": FLATFILE_TYPE,
-                "IDENTIFIERS": raw_cfg.get("identifiers"),
+                "IDENTIFIERS": IDENTIFIERS,
                 "ORIGIN_COL": ORIGIN_COL,
-                "ORIGIN_WEIGHTS": str(ORIGIN_WEIGHTS),
-                "ORIGIN_DEFAULT_WEIGHT": ORIGIN_DEFAULT_WEIGHT,
                 "MAX_PREDICATES_PER_RULE": MAX_PREDICATES_PER_RULE,
                 "MAX_RULES": MAX_RULES,
                 "MIN_RECALL": MIN_RECALL,
