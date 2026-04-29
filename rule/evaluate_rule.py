@@ -350,9 +350,7 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
     return fig
 
 
-def filter_by_min_reimbursement(
-    data: pl.DataFrame, threshold: float
-) -> pl.DataFrame:
+def filter_by_min_reimbursement(data: pl.DataFrame, threshold: float) -> pl.DataFrame:
     """
     Drops pairs where min(MAX_REIMBURSEMENT, MAX_REIMBURSEMENT__2) ≤ threshold.
 
@@ -378,7 +376,9 @@ def filter_by_min_reimbursement(
         try:
             conn.execute(text("DROP TABLE DA00249.TEMP_DZ_FILTER"))
         except Exception as e:
-            logging.info(f"filter_by_min_reimbursement: no table to drop (expected): {e}")
+            logging.info(
+                f"filter_by_min_reimbursement: no table to drop (expected): {e}"
+            )
 
     pos_preds.select(raw_ids).write_database(
         table_name="DA00249.TEMP_DZ_FILTER",
@@ -388,10 +388,14 @@ def filter_by_min_reimbursement(
 
     with conn_sw.connect() as conn:
         conn.execute(
-            text('CREATE INDEX idx_f_ids ON DA00249.TEMP_DZ_FILTER ("StackID", "DocID", "SubDocID")')
+            text(
+                'CREATE INDEX idx_f_ids ON DA00249.TEMP_DZ_FILTER ("StackID", "DocID", "SubDocID")'
+            )
         )
         conn.execute(
-            text('CREATE INDEX idx_f_ids_2 ON DA00249.TEMP_DZ_FILTER ("StackID__2", "DocID__2", "SubDocID__2")')
+            text(
+                'CREATE INDEX idx_f_ids_2 ON DA00249.TEMP_DZ_FILTER ("StackID__2", "DocID__2", "SubDocID__2")'
+            )
         )
         conn.commit()
 
@@ -421,8 +425,7 @@ def filter_by_min_reimbursement(
     # DB2 returns column names uppercase -> fix to original casing
     id_rename = {orig.upper(): orig for orig in raw_ids}
     enriched = (
-        enriched
-        .rename({c: id_rename[c] for c in enriched.columns if c in id_rename})
+        enriched.rename({c: id_rename[c] for c in enriched.columns if c in id_rename})
         .with_columns(pl.min_horizontal("R1", "R2").alias("_min_reimb"))
         .select([*raw_ids, "_min_reimb"])
     )
@@ -688,7 +691,7 @@ def plot_pr_value_landscape(
     """
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    be_prec = review_cost / avg_savings_per_dz
+    break_even_prec = review_cost / avg_savings_per_dz
     nv = [
         _net_value(p, r, total_pos, review_cost, avg_savings_per_dz)
         for p, r in zip(precision, recall)
@@ -764,7 +767,7 @@ def plot_pr_value_landscape(
         inline=True,
         fontsize=8,
         fmt={0: "Break-Even precision (0 EUR)"},
-        manual=[(0.5, be_prec)],
+        manual=[(0.5, break_even_prec)],
     )
 
     ax.plot(recall, precision, color="#333333", linewidth=1.2, zorder=3)
@@ -871,7 +874,7 @@ def plot_pr_value_landscape(
         fontweight="normal",
         ha="left",
         va="bottom",
-        linespacing=0.7
+        linespacing=0.7,
     )
     ax.spines[["top", "right"]].set_visible(False)
     legend_handles = [
@@ -991,7 +994,7 @@ def plot_expected_savings(
         fontsize=10,
         ha="left",
         va="bottom",
-        linespacing=0.7
+        linespacing=0.7,
     )
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -1026,7 +1029,7 @@ def historic_estimated_plot(
     review_cost,
     avg_savings_per_dz,
     window_name,
-    min_reimbursement_threshold
+    min_reimbursement_threshold,
 ):
     """
     Builds the historic-window PR plot with hits-weighted precision (labeled exact +
@@ -1062,7 +1065,7 @@ def historic_estimated_plot(
         avg_savings_per_dz=avg_savings_per_dz,
         review_cost=review_cost,
         window_name=window_name,
-        min_reimbursement_threshold=min_reimbursement_threshold
+        min_reimbursement_threshold=min_reimbursement_threshold,
     )
     return pr_fig, nv_fig
 
@@ -1095,25 +1098,29 @@ def evaluate_rule(
             for rule in greedy_rules
         ]
 
-        data = base_data.filter(window_filter).with_columns(
-            pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
-            pl.any_horizontal(comp).alias("or_mask"),
-        )
-        data = filter_by_min_reimbursement(
-            data, min_reimbursement_threshold
+        data = (
+            base_data
+            .filter(window_filter)
+            .with_columns(
+                pl.col(label_col).cast(pl.Boolean).fill_null(False).alias("labels"),
+                pl.any_horizontal(comp).alias("or_mask"),
+            )
+            .pipe(filter_by_min_reimbursement, min_reimbursement_threshold)
         )
 
+        # Savings
         savings_result = savings_analysis(data, label_col)
         avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
 
+        # Analyse number of pairs inside stack and outside stack
+        in_stack_out_stack = in_stack_out_stack_analysis(data)
+
+        # Get precision and recall values
         prec_values, rec_values, num_pos_preds, and_masks = full_data_prec_rec_per_rule(
             data, label_col, comp
         )
-
         total_pos = int(data["labels"].sum())
         steps = list(range(1, len(prec_values) + 1))
-
-        in_stack_out_stack = in_stack_out_stack_analysis(data)
 
         # Plots
         pr_value_plot, best_i = plot_pr_value_landscape(
@@ -1136,6 +1143,7 @@ def evaluate_rule(
             savings_result["enriched"], window_name
         )
 
+        # Build result dict
         result = {
             "pr_value": pr_value_plot,
             "lar_heatmap": lar_heatmap_plot,
@@ -1148,6 +1156,7 @@ def evaluate_rule(
 
         return_dict[window_name]["greedy"] = result
 
+        # Estimated precision plot
         pr_fig, nv_fig = historic_estimated_plot(
             window_data=data,
             and_masks=and_masks,
@@ -1159,7 +1168,7 @@ def evaluate_rule(
             review_cost=review_cost,
             avg_savings_per_dz=avg_savings_per_dz,
             window_name=window_name,
-            min_reimbursement_threshold=min_reimbursement_threshold
+            min_reimbursement_threshold=min_reimbursement_threshold,
         )
         return_dict[window_name]["greedy_estimated"] = {
             **result,
