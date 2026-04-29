@@ -14,8 +14,6 @@ Pipeline:
 """
 
 import logging
-from polars.series.series import Series
-from polars.series.series import Series
 import sys
 from collections import Counter
 from itertools import combinations
@@ -93,7 +91,9 @@ def detect_feature_groups(columns):
 
     groups: list[tuple[str, list[str]]] = []
     for (feature, _), thresholds in sorted(grouped.items()):
-        thresholds: list[str] = sorted(set(thresholds), key=lambda t: LOOSENESS.get(t, 0))
+        thresholds: list[str] = sorted(
+            set(thresholds), key=lambda t: LOOSENESS.get(t, 0)
+        )
         groups.append((feature, thresholds))
     return groups
 
@@ -115,9 +115,18 @@ def load_data(
 
     schema_cols: list[str] = pl.scan_parquet(path).collect_schema().names()
     groups: list[tuple[str, list[str]]] = detect_feature_groups(schema_cols)
-    pred_cols: list[str] = [f"{t}_{feat}" for feat, thresholds in groups for t in thresholds]
+    pred_cols: list[str] = [
+        f"{t}_{feat}" for feat, thresholds in groups for t in thresholds
+    ]
     # lar is needed because of OLD_DZ_RULE
-    needed: list[str] = pred_cols + [label_col, "lar", "lar__2", "HUKIMPORTTIME", "HUKIMPORTTIME__2", origin_col]
+    needed: list[str] = pred_cols + [
+        label_col,
+        "lar",
+        "lar__2",
+        "HUKIMPORTTIME",
+        "HUKIMPORTTIME__2",
+        origin_col,
+    ]
 
     # Load with optional unlabelled downsampling. Labelled rows (True OR False)
     # are always kept; only unlabelled rows get downsampled so that the final
@@ -173,15 +182,21 @@ def load_data(
         logging.info(f"Loaded {len(df):,} rows")
 
     def _to_bool(frame: pl.DataFrame) -> tuple[dict[str, pl.Series], pl.Series]:
-        features: dict[str, pl.Series] = {c: frame[c].cast(pl.Boolean).fill_null(False) for c in pred_cols}
-        labels: pl.Series  = frame[label_col].cast(pl.Boolean).fill_null(False)
+        features: dict[str, pl.Series] = {
+            c: frame[c].cast(pl.Boolean).fill_null(False) for c in pred_cols
+        }
+        labels: pl.Series = frame[label_col].cast(pl.Boolean).fill_null(False)
         return features, labels
 
     result: dict[str, Any] = {"groups": groups}
 
     if test_split and test_split > 0:
-        pos_df: pl.DataFrame = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) == 1)
-        neg_df: pl.DataFrame = df.filter(pl.col(label_col).cast(pl.Int8).fill_null(0) != 1)
+        pos_df: pl.DataFrame = df.filter(
+            pl.col(label_col).cast(pl.Int8).fill_null(0) == 1
+        )
+        neg_df: pl.DataFrame = df.filter(
+            pl.col(label_col).cast(pl.Int8).fill_null(0) != 1
+        )
         n_pos_train: int = int(len(pos_df) * (1 - test_split))
         n_neg_train: int = int(len(neg_df) * (1 - test_split))
 
@@ -271,6 +286,7 @@ def generate_candidate_rules(features, groups, labels, max_preds, min_new_tp):
 def diversity_filter(candidates, max_count):
     """
     Only needed if max_rules < len(candidates).
+
     Heuristically keeps top N/2 by precision + top N/2 by TP count (deduplicated).
     """
     if len(candidates) <= max_count:
@@ -566,23 +582,29 @@ def build_runtime_config(cfg: dict) -> dict:
 
     date_filter = pl.lit(True)
     if train_start := f.get("train_start"):
-        date_filter = date_filter & pl.col("HUKIMPORTTIME").ge(
-            pl.datetime(*[int(x) for x in train_start.split("-")])
-        ) & pl.col("HUKIMPORTTIME__2").ge(
-            pl.datetime(*[int(x) for x in train_start.split("-")])
+        date_filter = (
+            date_filter
+            & pl.col("HUKIMPORTTIME").ge(
+                pl.datetime(*[int(x) for x in train_start.split("-")])
+            )
+            & pl.col("HUKIMPORTTIME__2").ge(
+                pl.datetime(*[int(x) for x in train_start.split("-")])
+            )
         )
     if train_end := f.get("train_end"):
-        date_filter = date_filter & pl.col("HUKIMPORTTIME").lt(
-            pl.datetime(*[int(x) for x in train_end.split("-")])
-        ) & pl.col("HUKIMPORTTIME__2").lt(
-            pl.datetime(*[int(x) for x in train_end.split("-")])
+        date_filter = (
+            date_filter
+            & pl.col("HUKIMPORTTIME").lt(
+                pl.datetime(*[int(x) for x in train_end.split("-")])
+            )
+            & pl.col("HUKIMPORTTIME__2").lt(
+                pl.datetime(*[int(x) for x in train_end.split("-")])
+            )
         )
 
     # Labelled rows (True or False) bypass the date filter; unlabelled rows
     # must fall inside the training window.
-    train_filter = base_filter & (
-        pl.col(label_col).is_not_null() | date_filter
-    )
+    train_filter = base_filter & (pl.col(label_col).is_not_null() | date_filter)
 
     identifiers_map = {"dev": AggregationIdentifiers.dev()}
     identifiers = identifiers_map[cfg["identifiers"]]
@@ -652,7 +674,9 @@ def main(cfg: DictConfig):
         has_test: bool = "test_features" in data
 
         # Phase 1: Candidate rule generation
-        logging.info(f"\n--- Phase 1: Candidate rule generation (max_preds={MAX_PREDICATES_PER_RULE}) ---")
+        logging.info(
+            f"\n--- Phase 1: Candidate rule generation (max_preds={MAX_PREDICATES_PER_RULE}) ---"
+        )
         candidates = generate_candidate_rules(
             features, groups, labels, MAX_PREDICATES_PER_RULE, MIN_NEW_TP
         )
@@ -828,10 +852,7 @@ def main(cfg: DictConfig):
             "rules.json",
         )
 
-        mlflow.log_dict(
-            evaluation_dict,
-            artifact_file="evaluation.json"
-        )
+        mlflow.log_dict(evaluation_dict, artifact_file="evaluation.json")
 
 
 if __name__ == "__main__":
