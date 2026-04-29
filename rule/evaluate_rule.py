@@ -351,14 +351,13 @@ def plot_savings_by_time_difference(enriched: pl.DataFrame, window_name: str):
 
 
 def filter_by_min_reimbursement(
-    data: pl.DataFrame, threshold: float, mask_col: str = "or_mask"
+    data: pl.DataFrame, threshold: float
 ) -> pl.DataFrame:
     """
     Drops pairs where min(MAX_REIMBURSEMENT, MAX_REIMBURSEMENT__2) ≤ threshold.
 
-    Only rows with `mask_col == True` (positive predictions) are checked against
-    the DB — non-flagged rows pass through unchanged since they are never
-    proposed for review.
+    Only positive predictions are checked against the DB. Non-flagged rows and pairs
+    without DB match are kept by default.
     """
     if threshold is None or threshold <= 0:
         return data
@@ -366,8 +365,7 @@ def filter_by_min_reimbursement(
     conn_sw = get_engine(database="spielwiese")
     raw_ids = ["StackID", "DocID", "SubDocID", "StackID__2", "DocID__2", "SubDocID__2"]
 
-    data_with_order = data.with_row_index("row_order")
-    pos_preds = data_with_order.filter(pl.col(mask_col).cast(pl.Boolean))
+    pos_preds = data.filter(pl.col("or_mask").cast(pl.Boolean))
     logging.info(
         f"filter_by_min_reimbursement: input rows={data.height}, "
         f"pos_preds={pos_preds.height}, threshold={threshold}"
@@ -382,7 +380,7 @@ def filter_by_min_reimbursement(
         except Exception as e:
             logging.info(f"filter_by_min_reimbursement: no table to drop (expected): {e}")
 
-    pos_preds.select(["row_order", *raw_ids]).write_database(
+    pos_preds.select(raw_ids).write_database(
         table_name="DA00249.TEMP_DZ_FILTER",
         connection=conn_sw,
         engine_options={"dtype": {c: VARCHAR(length=50) for c in raw_ids}},
@@ -399,7 +397,8 @@ def filter_by_min_reimbursement(
 
     enriched = pl.read_database(
         query="""
-            SELECT t."row_order",
+            SELECT t."StackID", t."DocID", t."SubDocID",
+                   t."StackID__2", t."DocID__2", t."SubDocID__2",
                    h1.MAX_REIMBURSEMENT AS R1,
                    h2.MAX_REIMBURSEMENT AS R2
             FROM DA00249.TEMP_DZ_FILTER t
@@ -419,33 +418,28 @@ def filter_by_min_reimbursement(
         connection=conn_sw,
     )
 
-    row_order_col = next(c for c in enriched.columns if c.lower() == "row_order")
-    r1_col = next(c for c in enriched.columns if c.upper() == "R1")
-    r2_col = next(c for c in enriched.columns if c.upper() == "R2")
-
-    enriched = enriched.with_columns(
-        pl.min_horizontal(r1_col, r2_col).alias("_min_reimb")
-    ).rename({row_order_col: "row_order"})
+    # DB2 returns column names uppercase -> fix to original casing
+    id_rename = {orig.upper(): orig for orig in raw_ids}
+    enriched = (
+        enriched
+        .rename({c: id_rename[c] for c in enriched.columns if c in id_rename})
+        .with_columns(pl.min_horizontal("R1", "R2").alias("_min_reimb"))
+        .select([*raw_ids, "_min_reimb"])
+    )
 
     n_no_match = int(enriched["_min_reimb"].is_null().sum())
     if n_no_match > 0:
         logging.warning(
-            f"filter_by_min_reimbursement: {n_no_match} of {pos_preds.height} "
-            f"pos-pred pairs had NO MAX_REIMBURSEMENT in DB — kept by default"
+            f"filter_by_min_reimbursement: {n_no_match} of {pos_preds.height} pos-pred pairs "
+            f"had NO MAX_REIMBURSEMENT in DB — kept by default"
         )
 
-    joined = data_with_order.join(
-        enriched.select(["row_order", "_min_reimb"]),
-        on="row_order",
-        how="left",
-    )
-    # Drop only flagged rows that have a reimbursement ≤ threshold.
-    # Unflagged rows and flagged rows without DB match pass through.
+    joined = data.join(enriched, on=raw_ids, how="left")
     kept = joined.filter(
-        ~pl.col(mask_col).cast(pl.Boolean)
-        | pl.col("_min_reimb").is_null()
-        | pl.col("_min_reimb").gt(threshold)
-    ).drop(["row_order", "_min_reimb"])
+        pl.col("_min_reimb").is_null()  # unflagged or no DB match
+        | pl.col("_min_reimb").gt(threshold)  # flagged but reimbursement too low
+    ).drop("_min_reimb")
+
     logging.info(
         f"filter_by_min_reimbursement: kept {kept.height} of {data.height} rows "
         f"(dropped {data.height - kept.height} flagged pairs below threshold, "
@@ -685,6 +679,7 @@ def plot_pr_value_landscape(
     precision_se=None,
     ci_z=1.96,
     has_evidence=None,
+    min_reimbursement_threshold=0.0,
 ):
     """
     Precision-Recall curve on top of a € net-value heatmap.
@@ -864,17 +859,19 @@ def plot_pr_value_landscape(
         "Precision-recall trade-off and expected value optimum derivation",
         loc="left",
         fontweight="bold",
-        pad=25,
+        pad=40,
     )
     ax.text(
         x=0,
         y=1.02,
-        s=f"Review cost={review_cost:.2f} EUR, Avg. saving per DZ={avg_savings_per_dz:.2f} EUR, {_window_name_to_subtitle(window_name)}",
+        s=f"""Review cost={review_cost:.2f} EUR, Avg. saving per DZ={avg_savings_per_dz:.2f} EUR, {_window_name_to_subtitle(window_name)},
+        \nThreshold={min_reimbursement_threshold:.1f}""",
         transform=ax.transAxes,
         fontsize=10,
         fontweight="normal",
         ha="left",
         va="bottom",
+        linespacing=0.7
     )
     ax.spines[["top", "right"]].set_visible(False)
     legend_handles = [
@@ -922,9 +919,10 @@ def plot_expected_savings(
     review_cost,
     window_name,
     ci_z=1.96,
+    min_reimbursement_threshold=0.0,
 ):
     """Expected net value per rule count m with ±CI, using the combined estimator."""
-    combined_with_nv = combined_with_nv.head(20)
+    combined_with_nv = combined_with_nv
     m_vals = combined_with_nv["m"].to_numpy()
     nv = combined_with_nv["NV_est_m"].to_numpy()
     se = combined_with_nv["SE_NV_m"].to_numpy()
@@ -982,16 +980,18 @@ def plot_expected_savings(
         "Expected net value per rule count (labeled + historic-estimated)",
         loc="left",
         fontweight="bold",
-        pad=25,
+        pad=40,
     )
     ax.text(
         x=0,
         y=1.02,
-        s=f"Review cost={review_cost:.2f} €, Avg. saving per DZ={avg_savings_per_dz:.2f} €, {_window_name_to_subtitle(window_name)}",
+        s=f"""Review cost={review_cost:.2f} EUR, Avg. saving per DZ={avg_savings_per_dz:.2f} EUR, {_window_name_to_subtitle(window_name)},
+        \nThreshold={min_reimbursement_threshold:.1f}""",
         transform=ax.transAxes,
         fontsize=10,
         ha="left",
         va="bottom",
+        linespacing=0.7
     )
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -1026,6 +1026,7 @@ def historic_estimated_plot(
     review_cost,
     avg_savings_per_dz,
     window_name,
+    min_reimbursement_threshold
 ):
     """
     Builds the historic-window PR plot with hits-weighted precision (labeled exact +
@@ -1061,6 +1062,7 @@ def historic_estimated_plot(
         avg_savings_per_dz=avg_savings_per_dz,
         review_cost=review_cost,
         window_name=window_name,
+        min_reimbursement_threshold=min_reimbursement_threshold
     )
     return pr_fig, nv_fig
 
@@ -1074,9 +1076,7 @@ def evaluate_rule(
     review_cost: float,
     min_reimbursement_threshold: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
-    """
-    Evaluates greedy and final rule sets on two time windows.
-    """
+    """Evaluates greedy and final rule sets on two time windows."""
     # Compute savings_per_tp once from all positives over the full base filter
     logging.info("Starting to read data.")
     base_data = pl.read_parquet(data_path).filter(filter_expression)
@@ -1086,8 +1086,8 @@ def evaluate_rule(
     for window_name, window_filter in EVAL_WINDOWS:
         return_dict[window_name] = {}
 
-        # for comp_name, rules in [("greedy", greedy_rules), ("final", final_rules)]:       
-    
+        # for comp_name, rules in [("greedy", greedy_rules), ("final", final_rules)]:
+
         comp = [
             pl.all_horizontal(
                 [pl.col(c).cast(pl.Boolean).fill_null(False) for c in rule]
@@ -1100,14 +1100,14 @@ def evaluate_rule(
             pl.any_horizontal(comp).alias("or_mask"),
         )
         data = filter_by_min_reimbursement(
-            data, min_reimbursement_threshold, mask_col="or_mask"
+            data, min_reimbursement_threshold
         )
 
         savings_result = savings_analysis(data, label_col)
         avg_savings_per_dz = savings_result["all_pos"]["average_savings"]
 
-        prec_values, rec_values, num_pos_preds, and_masks = (
-            full_data_prec_rec_per_rule(data, label_col, comp)
+        prec_values, rec_values, num_pos_preds, and_masks = full_data_prec_rec_per_rule(
+            data, label_col, comp
         )
 
         total_pos = int(data["labels"].sum())
@@ -1125,11 +1125,10 @@ def evaluate_rule(
             review_cost=review_cost,
             avg_savings_per_dz=avg_savings_per_dz,
             window_name=window_name,
+            min_reimbursement_threshold=min_reimbursement_threshold,
         )
 
-        data_optimum_rule = filter_data_to_best_rules(
-            data, comp, label_col, best_i
-        )
+        data_optimum_rule = filter_data_to_best_rules(data, comp, label_col, best_i)
 
         lar_heatmap_plot = generate_lar_heatmap(data_optimum_rule)
         time_diff_plot = generate_time_difference_plot(data_optimum_rule)
@@ -1160,11 +1159,12 @@ def evaluate_rule(
             review_cost=review_cost,
             avg_savings_per_dz=avg_savings_per_dz,
             window_name=window_name,
+            min_reimbursement_threshold=min_reimbursement_threshold
         )
         return_dict[window_name]["greedy_estimated"] = {
             **result,
             "pr_value": pr_fig,
             "expected_savings": nv_fig,
-            }
+        }
 
     return return_dict
