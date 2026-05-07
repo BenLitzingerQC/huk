@@ -1,0 +1,89 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[ngerman]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+\setbeamercolor{frametitle}{fg=black}
+\setbeamercolor{structure}{fg=black!85}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+
+\newcommand{\hl}[1]{\textbf{#1}}
+\newcommand{\m}{\mathbf{m}}
+\newcommand{\y}{\mathbf{y}}
+\newcommand{\cv}{\mathbf{c}}
+
+\begin{document}
+
+{\setbeamertemplate{footline}{}
+\begin{frame}[t]
+\frametitle{Erkl\"arung des verwendeten Algorithmus zur optimalen Regelbestimmung}
+
+\scriptsize
+
+\textbf{Setting.}\quad
+Datensatz mit $n$ Zeilen, $m$ bin\"aren Pr\"adikaten $p_1,\dots,p_m$ (z.\,B.\ \texttt{eq\_start\_date}, \texttt{overlap\_0.5\_TAB\_BETR\_POSITION}) und Label
+$\y \in \{0,1\}^n$. Eine \hl{AND-Regel} ist eine Konjunktion $R = p_{i_1} \land \cdots \land p_{i_\ell}$, $\ell \leq k$.
+
+\smallskip
+
+\textbf{Ziel.}\quad
+Finde eine \hl{Composition} $\;C = R_1 \lor R_2 \lor \cdots \lor R_r\;$ aus $r$ AND-Regeln, sodass
+$\mathrm{Precision}(C)$ maximiert wird unter der Nebenbedingung $\mathrm{Recall}(C) \geq \rho^*$.
+
+\medskip
+
+\textbf{Phase 1 \textemdash{} Kandidatengenerierung (Apriori).}\quad
+Aus den $\sum_{\ell=1}^{k}\binom{m}{\ell}$ m\"oglichen AND-Regeln werden zwei Klassen entfernt:
+\begin{itemize}\itemsep0pt\topsep1pt
+  \item \hl{Subset-Pr\"adikate derselben Familie} (\texttt{dist\_1} $\subset$ \texttt{dist\_2}, \texttt{prop\_0.99} $\subset$ \texttt{prop\_0.95}, $\dots$): pro Feature-Gruppe nur eines.
+  \item \hl{Anti-monotones TP-Pruning}: Regeln mit $\mathit{TP}(R) < \texttt{min\_new\_tp}$ verwerfen, da $\mathit{TP}(R \land p) \leq \mathit{TP}(R)$.
+\end{itemize}
+Ergebnis: Kandidatenmenge $\mathcal{R} = \{(R_i, \m_i)\}_{i=1}^{|\mathcal{R}|}$ mit Maskenvektoren $\m_i \in \{0,1\}^n$, $(\m_i)_j = 1 \Leftrightarrow R_i$ feuert auf Zeile $j$.
+
+\medskip
+
+\textbf{Phase 2 \textemdash{} Greedy-Selektion.}\quad
+Sei $\cv^{(t)} = \bigvee_{u\leq t}\m_{s_u}$ der OR-Vektor nach Schritt $t$,
+$\mathit{tp}^{(t)} = \mathbf{1}^\top(\cv^{(t)} \!\wedge\! \y)$,
+$\mathit{pos}^{(t)} = \mathbf{1}^\top \cv^{(t)}$,
+$\Delta\mathit{tp}_i = \mathbf{1}^\top(\m_i \!\wedge\! \neg\cv^{(t-1)} \!\wedge\! \y)$,
+$\Delta\mathit{pos}_i = \mathbf{1}^\top(\m_i \!\wedge\! \neg\cv^{(t-1)})$.
+In jedem Schritt wird die Regel hinzugef\"ugt, welche die Precision der \emph{gesamten} Composition maximiert:
+\[
+\boxed{\;
+s_t \;=\; \arg\max_{i \in \mathcal{A}^{(t)}}\;
+\frac{\mathit{tp}^{(t-1)} + \Delta\mathit{tp}_i}{\mathit{pos}^{(t-1)} + \Delta\mathit{pos}_i}
+\quad\text{u.\,d.\,N.}\quad \Delta\mathit{tp}_i \geq \texttt{min\_new\_tp}\;}
+\]
+Abbruch bei $\mathit{tp}^{(t)}/\text{total\_pos} \geq \rho^*$ oder leerer Alive-Menge $\mathcal{A}^{(t)}$.
+
+\medskip
+
+\textbf{Nachverarbeitung.}\quad Reduziert die Regelanzahl ohne (Subsumption, Unique-TP) bzw.\ mit kontrolliertem Recall-Verlust (Merge).
+
+\smallskip
+
+\begin{minipage}[t]{0.48\textwidth}
+\underline{\textbf{Subsumption}}\\[1pt]
+Lockerheitshierarchie pro Feature-Familie, z.\,B.\ $\texttt{eq} \subset \texttt{dist\_1} \subset \cdots \subset \texttt{dist\_4}$. Schreibe $\ell(p)$ f\"ur den Lockerheitsindex.
+$A$ \emph{dominiert} $B$ ($A \succ B$) gdw.\ $\forall p_A \!\in\! A\;\exists p_B \!\in\! B$ derselben Gruppe mit
+$\ell(p_A) \geq \ell(p_B)$. Dann $\m_B \subseteq \m_A$, also $B$ redundant in $A \lor B$.
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\underline{\textbf{Unique True Positives}}\\[1pt]
+F\"ur $R_i \in \{R_1,\dots,R_r\}$:
+\[
+\mathit{UTP}(R_i) \;=\; \mathbf{1}^\top\!\Bigl(\m_i \;\wedge\; \neg\!\!\bigvee_{j \neq i}\m_j \;\wedge\; \y\Bigr).
+\]
+$\mathit{UTP}(R_i) = 0$: $R_i$ entfernen \"andert Recall nicht, Precision steigt.
+\end{minipage}
+
+\end{frame}
+}
+
+\end{document}

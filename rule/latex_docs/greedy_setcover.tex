@@ -1,0 +1,428 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[ngerman]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{tikz}
+\usetikzlibrary{trees,arrows.meta,positioning}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\title{Greedy Set Cover\\[0.3em]\large Zweiphasiger Algorithmus zur precision-optimalen Regelkomposition}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%% ---------------------------------------------------------------
+\section{Problemstellung}
+
+Gegeben sei ein Datensatz mit $n$ Zeilen, $m$ bin\"aren Pr\"adikaten $p_1, \dots, p_m$ (aufgeteilt in Feature-Gruppen) sowie einem bin\"aren Label~$\mathbf{y} \in \{0,1\}^n$ mit $\text{total\_pos} = \mathbf{1}^\top \mathbf{y}$ Positiven.
+
+\medskip
+\textbf{Ziel:} Finde eine \emph{Composition}
+\[
+  C = R_1 \;\lor\; R_2 \;\lor\; \cdots \;\lor\; R_r
+\]
+aus $r$ AND-Regeln, sodass die \textbf{Precision} maximiert wird, w\"ahrend ein gew\"unschter \textbf{Recall} erreicht wird. Im Unterschied zu den B\&B-Ans\"atzen wird kein fester min\_recall-Constraint gesetzt. Stattdessen liefert der Algorithmus \emph{alle Zwischenschritte} --- eine monoton steigende Recall-Folge --- aus der f\"ur jedes gew\"unschte Recall-Ziel die beste Composition abgelesen werden kann.
+
+\medskip
+\textbf{Parameter:}
+\begin{itemize}[nosep]
+  \item \texttt{max\_k}: Maximale Anzahl Pr\"adikate pro AND-Regel
+  \item \texttt{min\_tp}: Minimale True Positives f\"ur Kandidatenregeln (Phase~1)
+  \item \texttt{min\_new\_tp}: Minimale \emph{neue} True Positives, damit eine Regel in einem Schritt ausgew\"ahlt wird (Phase~2)
+  \item \texttt{max\_candidates}: Obergrenze f\"ur die Kandidatenanzahl (Diversity-Filter)
+\end{itemize}
+
+%% ---------------------------------------------------------------
+\section{Phase 1: Kandidatengenerierung (Apriori)}
+
+Die Kandidatengenerierung nutzt denselben Apriori-Algorithmus wie der Apriori+B\&B-Ansatz. Die Anti-Monotonie der AND-Verkn\"upfung dient als Pruning-Kriterium:
+\[
+  \mathit{TP}(R \land p) \;\leq\; \mathit{TP}(R)
+\]
+
+\subsection{Level-weiser Aufbau}
+
+\textbf{Level 1:} Erzeuge alle Ein-Pr\"adikat-Regeln $\{p_i\}$ mit $\mathit{TP}(p_i) \geq \text{min\_tp}$.
+
+\medskip
+\textbf{Level $\ell \to \ell+1$} (bis $\ell = \texttt{max\_k}$): F\"ur jede Regel $R$ aus Level~$\ell$ und jedes Pr\"adikat $p_j$ mit Gruppenindex $>$ h\"ochster Gruppenindex in $R$:
+\begin{itemize}[nosep]
+  \item Bilde $R' = R \land p_j$
+  \item Falls $\mathit{TP}(R') \geq \text{min\_tp}$: behalte $R'$
+  \item Sonst: verwerfe (Pruning)
+\end{itemize}
+
+\noindent Die Constraint \emph{maximal ein Pr\"adikat pro Feature-Gruppe} wird durch den aufsteigenden Gruppenindex sichergestellt.
+
+\subsection{Scoring und Diversity-Filter}
+
+Jede Kandidatenregel $R_i$ wird durch ihren Maskenvektor $\mathbf{m}_i \in \{0,1\}^n$ repr\"asentiert und bekommt zwei Scores:
+\[
+  \mathit{prec}_i = \frac{\mathbf{1}^\top(\mathbf{m}_i \wedge \mathbf{y})}{\mathbf{1}^\top \mathbf{m}_i}, \qquad
+  \mathit{tp}_i = \mathbf{1}^\top(\mathbf{m}_i \wedge \mathbf{y})
+\]
+
+\noindent Falls die Kandidatenanzahl $|\mathcal{R}|$ die Obergrenze \texttt{max\_candidates} \"uberschreitet, greift ein \textbf{Diversity-Filter}: Die Top-$N/2$ nach Precision und die Top-$N/2$ nach TP werden vereinigt. Dadurch bleiben sowohl pr\"azise als auch recall-starke Regeln erhalten.
+
+%% ---------------------------------------------------------------
+\section{Phase 2: Greedy-Selektion}
+
+\subsection{Grundidee}
+
+Der Greedy-Algorithmus baut die Composition schrittweise auf: In jedem Schritt wird genau eine Regel ausgew\"ahlt und per OR zur bestehenden Composition hinzugef\"ugt. Das Auswahlkriterium ist die \textbf{marginale Precision} --- die Precision der \emph{gesamten} Composition nach Hinzuf\"ugen der neuen Regel.
+
+\subsection{Formale Beschreibung}
+
+Sei $\mathbf{c}^{(t)}$ der OR-Vektor der Composition nach Schritt~$t$:
+\[
+  \mathbf{c}^{(0)} = \mathbf{0}, \qquad \mathbf{c}^{(t)} = \mathbf{c}^{(t-1)} \;\vee\; \mathbf{m}_{s_t}
+\]
+wobei $s_t$ die in Schritt~$t$ gew\"ahlte Regel ist. Definiere:
+\begin{align*}
+  \mathit{tp}^{(t)} &= \mathbf{1}^\top(\mathbf{c}^{(t)} \wedge \mathbf{y}) &&\text{(kumulative True Positives)}\\
+  \mathit{pos}^{(t)} &= \mathbf{1}^\top \mathbf{c}^{(t)} &&\text{(kumulative Positives)}
+\end{align*}
+
+\noindent F\"ur eine Kandidatenregel $R_i$ mit Maske $\mathbf{m}_i$ berechne die \emph{neuen, noch nicht abgedeckten} Treffer:
+\begin{align*}
+  \mathbf{u}_i &= \mathbf{m}_i \;\wedge\; \neg\,\mathbf{c}^{(t-1)} &&\text{(uncovered = neue Treffer durch $R_i$)}\\
+  \Delta\mathit{tp}_i &= \mathbf{1}^\top(\mathbf{u}_i \wedge \mathbf{y}) &&\text{(neue True Positives)}\\
+  \Delta\mathit{pos}_i &= \mathbf{1}^\top \mathbf{u}_i &&\text{(neue Positives insgesamt)}
+\end{align*}
+
+\noindent Die \textbf{Auswahlregel} in Schritt~$t$ ist:
+\[
+  s_t = \arg\max_{i \in \mathcal{A}^{(t)}} \;\frac{\mathit{tp}^{(t-1)} + \Delta\mathit{tp}_i}{\mathit{pos}^{(t-1)} + \Delta\mathit{pos}_i}
+\]
+unter der Nebenbedingung $\Delta\mathit{tp}_i \geq \texttt{min\_new\_tp}$.
+
+\subsection{Alive-Menge und Terminierung}
+
+Die Menge der ``lebenden'' Kandidaten $\mathcal{A}^{(t)}$ wird in jedem Schritt aktualisiert:
+\begin{itemize}[nosep]
+  \item Falls $\Delta\mathit{tp}_i < \texttt{min\_new\_tp}$: Regel $R_i$ wird \textbf{permanent entfernt}. Da die OR-Maske~$\mathbf{c}$ in jedem Schritt nur w\"achst, ist $\Delta\mathit{tp}_i$ monoton fallend --- eine Regel, die jetzt unter dem Schwellwert liegt, kann ihn sp\"ater nie mehr erreichen.
+\end{itemize}
+
+\noindent Der Algorithmus terminiert, wenn:
+\begin{enumerate}[nosep]
+  \item Keine Regel in $\mathcal{A}^{(t)}$ hat $\Delta\mathit{tp}_i \geq \texttt{min\_new\_tp}$, oder
+  \item \texttt{max\_steps} erreicht ist.
+\end{enumerate}
+
+%% ---------------------------------------------------------------
+\section{Algorithmus}
+
+\begin{algorithm}[H]
+\caption{Greedy Set Cover}
+\begin{algorithmic}[1]
+\Require Kandidatenregeln $\{(R_i, \mathbf{m}_i)\}$, Labels $\mathbf{y}$, Parameter \texttt{min\_new\_tp}
+\Ensure Schrittfolge $\mathcal{S} = [(t, \mathit{recall}^{(t)}, \mathit{prec}^{(t)}, \text{Regeln}^{(t)})]$
+\State $\mathbf{c} \gets \mathbf{0}^n$, $\;\mathit{tp} \gets 0$, $\;\mathit{pos} \gets 0$
+\State $\mathcal{A} \gets \{1, \dots, |\mathcal{R}|\}$ \Comment{Alive-Menge}
+\For{$t = 1, 2, \dots$}
+  \State $\mathit{best\_score} \gets -1$, $\;\mathit{best} \gets \text{nil}$
+  \State $\mathcal{A}' \gets \emptyset$
+  \For{$i \in \mathcal{A}$}
+    \State $\mathbf{u}_i \gets \mathbf{m}_i \wedge \neg\,\mathbf{c}$
+    \State $\Delta\mathit{tp}_i \gets \mathbf{1}^\top(\mathbf{u}_i \wedge \mathbf{y})$
+    \If{$\Delta\mathit{tp}_i < \texttt{min\_new\_tp}$}
+      \State \textbf{continue} \Comment{Permanent entfernt ($\Delta\mathit{tp}$ monoton fallend)}
+    \EndIf
+    \State $\mathcal{A}' \gets \mathcal{A}' \cup \{i\}$
+    \State $\Delta\mathit{pos}_i \gets \mathbf{1}^\top \mathbf{u}_i$
+    \State $\mathit{score}_i \gets (\mathit{tp} + \Delta\mathit{tp}_i) \;/\; (\mathit{pos} + \Delta\mathit{pos}_i)$
+    \If{$\mathit{score}_i > \mathit{best\_score}$}
+      \State $\mathit{best\_score} \gets \mathit{score}_i$, $\;\mathit{best} \gets i$
+    \EndIf
+  \EndFor
+  \State $\mathcal{A} \gets \mathcal{A}'$
+  \If{$\mathit{best} = \text{nil}$}
+    \State \textbf{break} \Comment{Keine Regel erf\"ullt \texttt{min\_new\_tp}}
+  \EndIf
+  \State $\mathbf{c} \gets \mathbf{c} \;\vee\; \mathbf{m}_{\mathit{best}}$
+  \State $\mathit{tp} \gets \mathit{tp} + \Delta\mathit{tp}_{\mathit{best}}$, $\;\mathit{pos} \gets \mathit{pos} + \Delta\mathit{pos}_{\mathit{best}}$
+  \State Speichere Schritt $(t, \;\mathit{tp}/\text{total\_pos}, \;\mathit{tp}/\mathit{pos}, \;\text{Regeln})$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+%% ---------------------------------------------------------------
+\section{Beispiel}
+
+Gegeben seien 4 Kandidatenregeln mit folgenden Maskenvektoren ($n = 10$, $\text{total\_pos} = 5$, \texttt{min\_new\_tp} $= 1$):
+
+\medskip
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lcccc}
+\toprule
+& $R_1$ & $R_2$ & $R_3$ & $R_4$ \\
+\midrule
+Maske $\mathbf{m}_i$ & \texttt{1100100000} & \texttt{0011010000} & \texttt{0000011100} & \texttt{0000000011} \\
+TP & 2 & 2 & 1 & 0 \\
+Pos & 3 & 3 & 3 & 2 \\
+Precision & 66.7\% & 66.7\% & 33.3\% & 0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+\noindent Label: $\mathbf{y} = \texttt{1101010000}$ (Positives an Stellen 1, 2, 4, 6).
+
+\bigskip
+\textbf{Schritt 1:} Alle Regeln werden evaluiert. $R_4$ hat $\mathit{TP} = 0$ und wird entfernt. $R_1$ und $R_2$ haben marginale Precision $\frac{2}{3} = 66{,}7\%$. $R_1$ wird gew\"ahlt (Tie-Break).
+\[
+  \mathbf{c}^{(1)} = \texttt{1100100000}, \quad \mathit{tp} = 2, \quad \mathit{pos} = 3, \quad \text{Recall} = \frac{2}{5} = 40\%
+\]
+
+\textbf{Schritt 2:} Nur noch uncovered Treffer z\"ahlen. $R_2$: $\mathbf{u}_2 = \texttt{0011010000}$, $\Delta\mathit{tp} = 2$, $\Delta\mathit{pos} = 3$. Marginale Precision: $\frac{2+2}{3+3} = 66{,}7\%$. $R_3$: $\Delta\mathit{tp} = 1$, $\Delta\mathit{pos} = 3$, marginale Precision: $\frac{2+1}{3+3} = 50\%$. $\Rightarrow$ $R_2$ wird gew\"ahlt.
+\[
+  \mathbf{c}^{(2)} = \texttt{1111110000}, \quad \mathit{tp} = 4, \quad \mathit{pos} = 6, \quad \text{Recall} = 80\%
+\]
+
+\textbf{Schritt 3:} $R_3$: $\mathbf{u}_3 = \texttt{0000001100}$, $\Delta\mathit{tp} = 0$ $\Rightarrow$ entfernt. Keine Kandidaten mehr. \textbf{Terminierung.}
+
+\bigskip
+\noindent\textbf{Ergebnis:} 2 Regeln, Recall = 80\%, Precision = 66{,}7\%. F\"ur Recall $\geq 40\%$ w\"ahlt man Schritt~1 (1~Regel, 66{,}7\%), f\"ur $\geq 80\%$ Schritt~2 (2~Regeln, 66{,}7\%).
+
+%% ---------------------------------------------------------------
+\section{Eigenschaften}
+
+\subsection{Determinismus und Monotonie}
+
+Der Algorithmus ist \textbf{vollst\"andig deterministisch}: Bei gleichen Eingaben und Parametern ergibt sich stets dieselbe Schrittfolge. Da in jedem Schritt mindestens $\texttt{min\_new\_tp} \geq 1$ neue True Positives hinzukommen, ist die Recall-Folge \textbf{streng monoton steigend}:
+\[
+  \mathit{recall}^{(0)} = 0 \;<\; \mathit{recall}^{(1)} \;<\; \cdots \;<\; \mathit{recall}^{(T)}
+\]
+
+\noindent Die Precision-Folge ist dagegen im Allgemeinen \textbf{monoton fallend}, da sp\"atere Regeln typischerweise unpr\"aziser sind.
+
+\subsection{Einmaliges Laufen statt mehrfacher Optimierung}
+
+Da der Algorithmus deterministisch ist, gen\"ugt \textbf{ein einziger Lauf} bis zur Terminierung. Aus der gespeicherten Schrittfolge kann f\"ur jedes beliebige Recall-Ziel $r^*$ die optimale Composition abgelesen werden:
+\[
+  \text{Schritt}^*(r^*) = \min\{t : \mathit{recall}^{(t)} \geq r^*\}
+\]
+Dies ist wesentlich effizienter als separate L\"aufe f\"ur verschiedene Recall-Ziele.
+
+\subsection{Rolle von \texttt{min\_new\_tp}}
+
+Der Parameter \texttt{min\_new\_tp} steuert den Trade-off zwischen Pr\"azision und Recall-Abdeckung:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lp{10cm}}
+\toprule
+\texttt{min\_new\_tp} & Auswirkung \\
+\midrule
+$= 1$ & Jede Regel mit mindestens einem neuen TP wird ber\"ucksichtigt. Maximaler erreichbarer Recall, aber viele unpr\"azise Regeln in sp\"ateren Schritten. \\
+$= 5$ & Balance: gen\"ugend Granularit\"at bei akzeptabler Regelqualit\"at. \\
+$= 10$ & Nur Regeln mit substanziellem Beitrag werden gew\"ahlt. Weniger Schritte, aber Recall-L\"ucken m\"oglich. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Adaptive Schwelle}
+
+In der Variante mit festem Recall-Ziel (\texttt{greedy\_select}) wird \texttt{min\_new\_tp} nicht konstant gehalten, sondern \textbf{adaptiv} an den verbleibenden Bedarf angepasst:
+\[
+  \texttt{adaptive\_min}^{(t)} = \max\!\Big(\texttt{min\_new\_tp},\;\big\lfloor 0{,}01 \cdot (\texttt{min\_tp} - \mathit{tp}^{(t-1)})\big\rfloor\Big)
+\]
+wobei $\texttt{min\_tp} = \lceil \texttt{min\_recall} \cdot \text{total\_pos} \rceil$ die Mindestanzahl an TPs ist.
+
+\medskip
+\noindent\textbf{Intuition:} Am Anfang fehlen noch viele TPs (z.\,B.\ $\texttt{remaining} = 2{.}800$), sodass $1\%$ davon $= 28$ ist --- nur Regeln mit substanziellem Beitrag werden gew\"ahlt. Gegen Ende ($\texttt{remaining} = 50$) sinkt die Schwelle auf $\max(\texttt{min\_new\_tp}, 0) = \texttt{min\_new\_tp}$, sodass auch kleine Regeln zugelassen werden, um den letzten Recall zu erreichen.
+
+\medskip
+\noindent\textbf{Konsequenz f\"ur die Alive-Menge:} Da die adaptive Schwelle sinken kann, d\"urfen Regeln mit $\Delta\mathit{tp}_i < \texttt{adaptive\_min}^{(t)}$ \emph{nicht} permanent entfernt werden --- sie k\"onnten in einem sp\"ateren Schritt mit niedrigerer Schwelle wieder in Frage kommen. Hier wird nur bei $\Delta\mathit{tp}_i < 1$ permanent entfernt (anders als bei der Variante mit fixem \texttt{min\_new\_tp}).
+
+\medskip
+\noindent\textbf{Effekt:} Fr\"uhe Schritte w\"ahlen breite, recall-starke Regeln; sp\"ate Schritte f\"ullen mit kleineren, pr\"azisen Regeln auf. Dadurch entsteht ein nat\"urlicher \"Ubergang von grober zu feiner Abdeckung.
+
+%% ---------------------------------------------------------------
+\section{Vergleich mit B\&B-Ans\"atzen}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{3.5cm}p{5.5cm}p{5.5cm}}
+\toprule
+& \textbf{Greedy Set Cover} & \textbf{B\&B-Ans\"atze} \\
+\midrule
+Optimalit\"at & Greedy-Approximation (keine Garantie f\"ur globales Optimum) & Exakt optimal (innerhalb des Suchraums) \\
+Laufzeit & $O(T \cdot |\mathcal{R}| \cdot n)$ mit $T$ Schritten & Exponentiell im Worst Case \\
+Skalierbarkeit & Problemlos f\"ur Millionen Zeilen und Tausende Kandidaten & Begrenzt durch $\binom{R}{r}$ Combinations \\
+Recall-Constraint & Implizit durch Schrittfolge & Explizit als Pruning-Kriterium \\
+Mehrere Recall-Ziele & Ein Lauf f\"ur alle & Je ein separater Lauf \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%% ---------------------------------------------------------------
+\section{Komplexit\"at}
+
+\renewcommand{\arraystretch}{1.3}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Phase & Komplexit\"at & Beschreibung \\
+\midrule
+Apriori & $O(m^k \cdot n)$ & Level-weiser Aufbau, $m$ Pr\"adikate, $k$ Levels \\
+Scoring & $O(|\mathcal{R}| \cdot n)$ & Einmalige Precision/TP-Berechnung \\
+Greedy & $O(T \cdot |\mathcal{R}| \cdot n)$ & $T$ Schritte, je $|\mathcal{R}|$ Kandidaten \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Praktisch: Die Alive-Menge $\mathcal{A}$ schrumpft in jedem Schritt, sodass sp\"atere Schritte schneller sind. F\"ur $k=3$, $|\mathcal{R}| \approx 3{.}000$ Kandidaten und $n = 2{,}8$M Zeilen dauert ein vollst\"andiger Lauf mit $\sim$70 Schritten wenige Sekunden.
+
+%% ---------------------------------------------------------------
+\section{Nachverarbeitung}
+
+Nach der Greedy-Selektion enth\"alt die Composition m\"oglicherweise redundante Regeln. Drei Nachverarbeitungsschritte reduzieren die Regelanzahl, ohne den Recall zu verringern (bei Subsumption und Unique-TP) bzw.\ mit kontrolliertem Recall-Verlust (bei Merge).
+
+\subsection{Subsumption Removal}
+
+\subsubsection{Threshold-Hierarchie}
+
+Pr\"adikate derselben Feature-Gruppe bilden eine \textbf{Lockerheitshierarchie}. Strenge Schwellwerte matchen weniger Zeilen als lockere:
+\[
+  \texttt{eq} \;\subset\; \texttt{dist\_1} \;\subset\; \texttt{dist\_2} \;\subset\; \texttt{dist\_3} \;\subset\; \texttt{dist\_4}
+\]
+\[
+  \texttt{prop\_0.99} \;\subset\; \texttt{prop\_0.95} \;\subset\; \texttt{prop\_0.9} \;\subset\; \texttt{prop\_0.8} \;\subset\; \texttt{prop\_0.7}
+\]
+\[
+  \texttt{overlap\_0.75} \;\subset\; \texttt{overlap\_0.5} \;\subset\; \texttt{overlap\_0}
+\]
+Jeder Schwellwert $\tau$ hat einen \textbf{Lockerheitsindex} $\ell(\tau) \in \mathbb{N}_0$, wobei $\ell = 0$ der strengste ist. F\"ur zwei Schwellwerte $\tau_1, \tau_2$ derselben Familie mit $\ell(\tau_1) \leq \ell(\tau_2)$ gilt:
+\[
+  \mathbf{m}(\tau_1\_f) \;\subseteq\; \mathbf{m}(\tau_2\_f)
+\]
+d.\,h.\ jede Zeile, die den strengen Schwellwert erf\"ullt, erf\"ullt auch den lockeren.
+
+\subsubsection{Dominanz-Relation}
+
+Eine Regel $A$ \textbf{dominiert} eine Regel $B$ (geschrieben $A \succ B$), wenn:
+\begin{enumerate}[nosep]
+  \item F\"ur jedes Pr\"adikat $p_A$ in $A$ existiert ein Pr\"adikat $p_B$ in $B$ aus \emph{derselben} Feature-Gruppe mit $\ell(p_A) \geq \ell(p_B)$ (d.\,h.\ $A$ ist mindestens so locker wie $B$ in dieser Gruppe).
+  \item $B$ darf zus\"atzliche Pr\"adikate besitzen (die $B$ noch enger machen).
+\end{enumerate}
+
+\noindent Falls $A \succ B$, dann gilt f\"ur die Masken: $\mathbf{m}_B \subseteq \mathbf{m}_A$. Jede Zeile, die von $B$ abgedeckt wird, wird auch von $A$ abgedeckt. In einer OR-Composition ist $B$ daher \textbf{redundant}.
+
+\subsubsection{Beispiel}
+
+Gegeben seien drei ausgew\"ahlte Regeln:
+\begin{align*}
+  R_1 &= \{\texttt{dist\_2\_end\_date}\} \\
+  R_2 &= \{\texttt{eq\_end\_date},\; \texttt{eq\_start\_date}\} \\
+  R_3 &= \{\texttt{dist\_1\_end\_date},\; \texttt{overlap\_0.5\_X}\}
+\end{align*}
+
+\noindent Pr\"ufe $R_1 \succ R_2$: $R_1$ hat \texttt{dist\_2\_end\_date} (Gruppe \texttt{end\_date}, $\ell = 2$). $R_2$ hat \texttt{eq\_end\_date} in derselben Gruppe mit $\ell = 0 \leq 2$ \checkmark. $R_2$ hat ein zus\"atzliches Pr\"adikat \texttt{eq\_start\_date} \checkmark. $\Rightarrow$ $R_1 \succ R_2$: \textbf{$R_2$ wird entfernt.}
+
+\medskip
+\noindent Pr\"ufe $R_1 \succ R_3$: $R_1$ hat \texttt{dist\_2\_end\_date} ($\ell = 2$). $R_3$ hat \texttt{dist\_1\_end\_date} ($\ell = 1 \leq 2$) \checkmark. $R_3$ hat \texttt{overlap\_0.5\_X} zus\"atzlich \checkmark. $\Rightarrow$ $R_1 \succ R_3$: \textbf{$R_3$ wird entfernt.}
+
+\medskip
+\noindent\textbf{Ergebnis:} Von 3 Regeln bleibt nur $R_1$ \"ubrig. Der Recall bleibt unver\"andert, da $\mathbf{m}_{R_2} \cup \mathbf{m}_{R_3} \subseteq \mathbf{m}_{R_1}$. Die Precision kann nur steigen (weniger FP durch weniger Regeln).
+
+\subsubsection{Algorithmus}
+
+F\"ur jedes Regelpaar $(R_i, R_j)$ mit $|R_i| \leq |R_j|$ wird gepr\"uft, ob $R_i \succ R_j$. Falls ja, wird $R_j$ als dominiert markiert. Komplexit\"at: $O(r^2 \cdot k)$ mit $r$ Regeln und maximal $k$ Pr\"adikaten pro Regel.
+
+%% ---------------------------------------------------------------
+\subsection{Unique-TP Removal}
+
+Nach der Subsumption-Bereinigung kann es Regeln geben, die zwar nicht von einer einzelnen anderen Regel dominiert werden, deren True Positives aber \emph{insgesamt} bereits von der Vereinigung aller anderen Regeln abgedeckt sind.
+
+\subsubsection{Definition}
+
+F\"ur eine Regel $R_i$ in der Composition $\{R_1, \dots, R_r\}$ sind die \textbf{Unique True Positives}:
+\[
+  \mathit{UTP}(R_i) = \mathbf{1}^\top\!\left(\mathbf{m}_i \;\wedge\; \neg\!\bigvee_{j \neq i} \mathbf{m}_j \;\wedge\; \mathbf{y}\right)
+\]
+Das sind die TPs, die \emph{ausschlie\ss lich} von $R_i$ abgedeckt werden und von keiner anderen Regel in der Composition.
+
+\medskip
+\noindent Falls $\mathit{UTP}(R_i) = 0$: Entfernung von $R_i$ \"andert den Recall nicht (alle TPs von $R_i$ werden von anderen Regeln abgedeckt), aber die Precision steigt, da die FPs von $R_i$ wegfallen.
+
+\subsubsection{Beispiel}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lccc}
+\toprule
+& Maske & TP-Maske & UTP \\
+\midrule
+$R_1$ & \texttt{111000} & \texttt{110000} & 1 (Pos.~1) \\
+$R_2$ & \texttt{011100} & \texttt{010100} & 1 (Pos.~4) \\
+$R_3$ & \texttt{010010} & \texttt{010000} & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent $\mathbf{y} = \texttt{110100}$. $R_3$ hat TP an Position~2, aber $R_1$ und $R_2$ decken Position~2 ebenfalls ab. $\Rightarrow$ $\mathit{UTP}(R_3) = 0$, $R_3$ wird entfernt. Recall bleibt bei $\frac{3}{3} = 100\%$, aber die FP von $R_3$ (Position~5) f\"allt weg.
+
+\subsubsection{Algorithmus}
+
+F\"ur jede Regel $R_i$: Berechne die OR-Maske aller anderen Regeln $\bigvee_{j \neq i} \mathbf{m}_j$, dann $\mathit{UTP}(R_i)$. Falls $\mathit{UTP}(R_i) = 0$, entferne $R_i$. Komplexit\"at: $O(r^2 \cdot n)$.
+
+%% ---------------------------------------------------------------
+\subsection{Merge}
+
+Der Merge-Schritt reduziert die Anzahl der Regeln durch \textbf{Zusammenfassung \"ahnlicher Regeln}. Regeln, die viele gemeinsame Pr\"adikate teilen, werden zu einer einzigen, strengeren Regel vereinigt.
+
+\subsubsection{Vorgehen}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Paar-H\"aufigkeiten z\"ahlen:} F\"ur jedes Pr\"adikatpaar $(p_a, p_b)$ wird gez\"ahlt, in wie vielen Regeln beide gleichzeitig vorkommen.
+  \item \textbf{Greedy-Gruppierung:} Das h\"aufigste Paar wird ausgew\"ahlt. Alle Regeln, die dieses Paar enthalten, bilden eine Gruppe.
+  \item \textbf{Vereinigung:} Alle Pr\"adikate der Gruppe werden zu einer einzigen AND-Regel zusammengefasst (Mengenvereinigung).
+  \item Wiederhole f\"ur das n\"achsth\"aufigste Paar (nur mit noch nicht gruppierten Regeln).
+\end{enumerate}
+
+\subsubsection{Beispiel}
+
+Gegeben seien 4 Regeln:
+\begin{align*}
+  R_1 &= \{A,\; B,\; C\} \\
+  R_2 &= \{A,\; B,\; D\} \\
+  R_3 &= \{A,\; B,\; E\} \\
+  R_4 &= \{C,\; D,\; F\}
+\end{align*}
+
+\noindent Das Paar $(A, B)$ kommt in $R_1, R_2, R_3$ vor (3-mal). Diese drei Regeln werden zusammengefasst:
+\[
+  R_1 \cup R_2 \cup R_3 = \{A,\; B,\; C,\; D,\; E\}
+\]
+$R_4$ bleibt unver\"andert. \textbf{Ergebnis:} 2 Regeln statt 4.
+
+\subsubsection{Auswirkung auf Metriken}
+
+Der Merge ist \textbf{nicht recall-erhaltend}. Die urspr\"ungliche Composition
+\[
+  (A \land B \land C) \;\lor\; (A \land B \land D) \;\lor\; (A \land B \land E)
+\]
+wird zu
+\[
+  A \land B \land C \land D \land E
+\]
+Die zusammengefasste Regel verlangt \emph{alle} Pr\"adikate gleichzeitig (AND), w\"ahrend die urspr\"unglichen Regeln per OR verkn\"upft waren. Dadurch matcht die Merge-Regel \emph{weniger} Zeilen:
+\[
+  \mathbf{m}_{A \land B \land C \land D \land E} \;\subseteq\; \mathbf{m}_{A \land B \land C} \;\cup\; \mathbf{m}_{A \land B \land D} \;\cup\; \mathbf{m}_{A \land B \land E}
+\]
+
+\noindent Der Vorteil liegt in der \textbf{Interpretierbarkeit}: Weniger, aber l\"angere Regeln sind oft leichter zu verstehen als viele kurze. Au\ss erdem steigt typischerweise die Precision, da die Merge-Regel strenger filtert.
+
+\medskip
+\noindent\textbf{Anwendung:} Der Merge wird nach der Greedy-Selektion und den recall-erhaltenden Bereinigungen (Subsumption, Unique-TP) durchgef\"uhrt. Recall und Precision werden danach neu berechnet.
+
+\end{document}
