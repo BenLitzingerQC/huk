@@ -500,6 +500,48 @@ def remove_redundant(rules, masks, labels, n_rows):
                 break
     return rules, masks
 
+
+def merge_rules(rules):
+    """
+    Merge rules that share ≥2 common predicates into a single AND-rule.
+
+    Greedily picks the most-frequent predicate pair, groups all rules containing that
+    pair, and unions their predicates into one rule. Single pass (no cascading). May
+    reduce recall.
+    """
+    if len(rules) <= 1:
+        return [list(r) for r in rules]
+
+    rule_sets = [set(r) for r in rules]
+    used = [False] * len(rules)
+    merged = []
+
+    pair_counts: Counter[Any] = Counter()
+    pair_to_rules: dict[Any, Any] = {}
+    for i, preds in enumerate(rule_sets):
+        for pair in combinations(sorted(preds), 2):
+            pair_counts[pair] += 1
+            pair_to_rules.setdefault(pair, []).append(i)
+
+    for pair, count in pair_counts.most_common():
+        if count < 2:
+            break
+        group = [i for i in pair_to_rules[pair] if not used[i]]
+        if len(group) < 2:
+            continue
+        union = set()
+        for i in group:
+            union |= rule_sets[i]
+            used[i] = True
+        merged.append(sorted(union))
+
+    for i, preds in enumerate(rule_sets):
+        if not used[i]:
+            merged.append(sorted(preds))
+
+    return merged
+
+
 # --- Evaluation ------------------------------------------------------------------
 
 
@@ -691,8 +733,14 @@ def main(cfg: DictConfig):
                 f"Unique-TP:   {n1} → {len(selected_rules_post_redundant)} rules"
             )
         n2 = len(selected_rules_post_redundant)
-
-        final_rules = selected_rules_post_redundant
+        if MERGE:
+            final_rules = merge_rules(selected_rules_post_redundant)
+            if len(final_rules) != len(selected_rules_post_redundant):
+                logging.info(
+                    f"Merge:       {len(selected_rules_post_redundant)} → {len(final_rules)} rules"
+                )
+        else:
+            final_rules = selected_rules_post_redundant
         # Evaluate
         logging.info("\n--- Results ---")
         train_prec, train_rec = evaluate(final_rules, features, labels)
@@ -783,6 +831,15 @@ def main(cfg: DictConfig):
                 "13_OUT_STACK_TOTAL_POS": float(gw["out_of_stack_stats"]["total_pos"]),
                 "14_OUT_STACK_TP": float(gw["out_of_stack_stats"]["tp"]),
                 "15_OUT_STACK_POS_PRED": float(gw["out_of_stack_stats"]["pos_pred"]),
+                # TP-only savings (was "savings" before)
+                "16_ALL_POS TOTAL SAVINGS": gw["savings_all_pos"]["total_savings"],
+                "17_ALL_POS AVG SAVINGS": gw["savings_all_pos"]["average_savings"],
+                "18_BOTH PAID TOTAL_SAVINGS": gw["savings_all_pos"]["both_paid_total"],
+                "19_BOTH PAID AVG SAVINGS": gw["savings_all_pos"]["both_paid_avg"],
+                "20_TPS TOTAL SAVINGS": gw["savings_tp"]["total_savings"],
+                "21_TPS_AVG_SAVINGS": gw["savings_tp"]["average_savings"],
+                "22_TPS_BOTH PAID TOTAL_SAVINGS": gw["savings_tp"]["both_paid_total"],
+                "23_TPS_BOTH PAID AVG SAVINGS": gw["savings_tp"]["both_paid_avg"],
             }
         )
 
