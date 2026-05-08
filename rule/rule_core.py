@@ -294,13 +294,15 @@ def find_composition(
     candidates,
     labels,
     min_recall,
-    max_rules,
     min_new_tp,
 ):
     """
     Greedily build a composition: at each step add the rule maximizing
     marginal precision (cumulative TP + new TP) / (cumulative pos. preds. + new pos. preds.),
     where "new" counts only rows not yet covered by the composition.
+
+    The loop stops when `min_recall` is reached or no candidate contributes any
+    new TPs (because every remaining rule's TPs are already covered).
 
     Adaptive threshold: each step requires new TP >= max(min_new_tp, 1% of remaining target).
     Permanent pruning: candidates with new TP = 0 are removed forever
@@ -315,10 +317,7 @@ def find_composition(
     cumulative_positive_predictions = 0
     alive = list(range(len(candidates)))
 
-    while (
-        cumulative_true_positives < min_true_positives
-        and len(composition.rules) < max_rules
-    ):
+    while cumulative_true_positives < min_true_positives:
         remaining = min_true_positives - cumulative_true_positives
         adaptive_min_true_positives = max(min_new_tp, int(remaining * 0.01))
 

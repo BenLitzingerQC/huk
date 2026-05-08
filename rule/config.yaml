@@ -27,8 +27,6 @@ origin:
 
 learning:
   max_predicates_per_rule: 2
-  max_rules: 1000
+  max_candidate_rules: 1000
   min_recall: 0.99
   min_new_tp: 5
-  max_candidates: 50000
-  merge: false

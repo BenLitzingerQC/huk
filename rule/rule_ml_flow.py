@@ -1,16 +1,21 @@
 """
-Greedy Set Cover for Rule Mining — Self-Contained Version.
+Hydra + MLflow entry point for the rule-mining pipeline.
 
-Finds an OR-composition of AND-rules that maximizes precision at a target
-recall. Each row in the dataset has pre-computed boolean predicate columns
-(e.g. eq_start_date, dist_2_end_date, overlap_0.5_TAB_BETR_POSITION).
+Builds an OR-composition of AND-rules over pre-computed boolean predicate
+columns (e.g. eq_start_date, dist_2_end_date, overlap_0.5_TAB_BETR_POSITION),
+optimised for net value on the historic window.
 
 Pipeline:
-  1. Load parquet with boolean predicate columns
-  2. Candidate rule generation: generate candidate AND-rules (bottom-up, anti-monotone pruning)
-  3. Greedy: iteratively select rules by marginal composition precision
-  4. Post-process: remove subsumed rules, remove redundant rules, merge
-  5. Evaluate on train / test
+  1. Load parquet, optionally downsample negatives, train/test split (rule_core.load_data)
+  2. Generate candidate AND-rules bottom-up with anti-monotone pruning
+     (rule_core.generate_candidate_rules)
+  3. Find composition: greedily pick rules maximising marginal precision
+     (rule_core.find_composition)
+  4. Train/test evaluation for sanity logging (rule_core.evaluate)
+  5. Historic-window evaluation: per-step net value via union-find on TP pairs,
+     pick the economic optimum, post-process with remove_subsumed +
+     remove_redundant on that sub-sequence (rule_evaluation.evaluate_composition)
+  6. Log params, metrics, plots, rule sets to MLflow
 """
 
 import logging
@@ -126,7 +131,7 @@ def main(cfg: DictConfig):
     IDENTIFIERS = built["IDENTIFIERS"]
     ORIGIN_COL = built["ORIGIN_COL"]
     MAX_PREDICATES_PER_RULE = built["MAX_PREDICATES_PER_RULE"]
-    MAX_RULES = built["MAX_RULES"]
+    MAX_CANDIDATE_RULES = built["MAX_CANDIDATE_RULES"]
     MIN_RECALL = built["MIN_RECALL"]
     MIN_NEW_TP = built["MIN_NEW_TP"]
     REVIEW_COST = built["REVIEW_COST"]
@@ -159,26 +164,23 @@ def main(cfg: DictConfig):
         candidates = generate_candidate_rules(
             features, groups, labels, MAX_PREDICATES_PER_RULE, MIN_NEW_TP
         )
-        if len(candidates) > MAX_RULES:
+        if len(candidates) > MAX_CANDIDATE_RULES:
             n_before = len(candidates)
             candidates = sorted(
                 candidates, key=lambda r: -r.train_true_positives
-            )[:MAX_RULES]
+            )[:MAX_CANDIDATE_RULES]
             logging.info(
                 f"{n_before:,} candidates → {len(candidates):,} after TP cutoff"
             )
         else:
             logging.info(f"{len(candidates):,} candidates")
 
-        # Phase 2: Greedy
-        logging.info(
-            f"\n--- Phase 2: Find composition (min_recall={MIN_RECALL}, max_rules={MAX_RULES}) ---"
-        )
+        # Phase 2: Find composition
+        logging.info(f"\n--- Phase 2: Find composition (min_recall={MIN_RECALL}) ---")
         composition = find_composition(
             candidates,
             labels,
             MIN_RECALL,
-            MAX_RULES,
             MIN_NEW_TP,
         )
 
@@ -233,7 +235,7 @@ def main(cfg: DictConfig):
                 "IDENTIFIERS": IDENTIFIERS,
                 "ORIGIN_COL": ORIGIN_COL,
                 "MAX_PREDICATES_PER_RULE": MAX_PREDICATES_PER_RULE,
-                "MAX_RULES": MAX_RULES,
+                "MAX_CANDIDATE_RULES": MAX_CANDIDATE_RULES,
                 "MIN_RECALL": MIN_RECALL,
                 "MIN_NEW_TP": MIN_NEW_TP,
                 "REVIEW_COST": REVIEW_COST,

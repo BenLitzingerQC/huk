@@ -395,28 +395,11 @@ def test_find_composition_picks_highest_precision_first():
         candidates,
         labels,
         min_recall=1.0,
-        max_rules=10,
         min_new_tp=1,
     )
     assert composition.rules[0].predicates == ["a"]
     assert composition.step_precision[0] == 1.0
     assert composition.step_recall[0] == 1.0
-
-
-def test_find_composition_stops_at_max_rules():
-    candidates = [
-        Rule(["a"], _bool_series([True, False]), 1.0, 1),
-        Rule(["b"], _bool_series([False, True]), 1.0, 1),
-    ]
-    labels = _bool_series([True, True])
-    composition = find_composition(
-        candidates,
-        labels,
-        min_recall=1.0,
-        max_rules=1,
-        min_new_tp=1,
-    )
-    assert len(composition.rules) == 1
 
 
 def test_find_composition_stops_when_recall_target_reached():
@@ -430,7 +413,6 @@ def test_find_composition_stops_when_recall_target_reached():
         candidates,
         labels,
         min_recall=0.5,
-        max_rules=10,
         min_new_tp=1,
     )
     assert len(composition.rules) == 1
@@ -442,7 +424,6 @@ def test_find_composition_no_candidates_returns_empty():
         [],
         labels,
         min_recall=1.0,
-        max_rules=5,
         min_new_tp=1,
     )
     assert composition.rules == []
@@ -466,7 +447,6 @@ def test_find_composition_ignores_candidates_with_zero_marginal_true_positives()
         candidates,
         labels,
         min_recall=1.0,
-        max_rules=10,
         min_new_tp=1,
     )
     assert len(composition.rules) == 1
