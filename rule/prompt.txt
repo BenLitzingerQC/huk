@@ -1,0 +1,14 @@
+1. Das Bewertungskriterium: Worauf optimieren wir?
+Deine Intuition, die Kombinationen mit der höchsten Precision zu behalten, ist völlig richtig – allerdings mit einer winzigen, aber entscheidenden Vorbedingung.
+Da ihr Level für Level vorgeht (Runde 1: eine Regel, Runde 2: zwei Regeln per ODER verknüpft, usw.), baut sich der Recall automatisch auf. Wenn du aus den 16 neuen Kandidaten die Top 4 auswählen musst, gehst du am besten so vor:
+⚬	Der Filter (Recall-Fortschritt sichern): Bevor du überhaupt sortierst, wirfst du alle Kombinationen weg, die im Vergleich zur Vorrunde nicht eine gewisse Mindestanzahl an neuen True Positives (echten Treffern) hinzugefügt haben. Genau diese Logik (min_new_tp) hast du ja bereits in deinem Greedy-Code! Das verhindert, dass die Beam Search Kombinationen behält, die zwar eine tolle Precision haben, den Recall aber quasi einfrieren.
+⚬	Das Ranking (Die finale Auswahl): Alle Kombinationen, die diesen Filter überleben, sortierst du absteigend nach ihrer Gesamt-Precision (also alle bisherigen kumulierten True Positives geteilt durch alle kumulierten positiven Vorhersagen). Die besten 4 kommen in die nächste Runde.
+So zwingst du den Algorithmus, den Recall stetig nach oben zu treiben, aber immer den "saubersten" Weg (wenigste False Positives) zu wählen.
+2. Das Duplikat-Problem (Regel A + B vs. Regel B + A)
+Das ist ein absoluter Klassiker in der Suchraum-Optimierung! Da eine ODER-Verknüpfung kommutativ ist (die Reihenfolge ist egal), werten A ODER B und B ODER A exakt dieselben Datenzeilen aus. Wenn du das nicht abfängst, besteht dein Beam nach drei Runden nur noch aus Permutationen derselben Regeln und die Vielfalt der Suche ist komplett zerstört.
+Die Lösung dafür ist extrem simpel und nennt sich Zustands-Deduplizierung (State Canonicalization):
+⚬	Gib jeder deiner generierten Basis-Regeln (aus Phase 1) einfach eine eindeutige ID (z.B. ihren Index in der Liste, 0 bis n).
+⚬	Wenn du in der Beam Search eine neue ODER-Kette zusammenbaust, speicherst du die IDs der beteiligten Regeln nicht als normale Liste, sondern als sortiertes Set (in Python z.B. als frozenset([id_A, id_B])).
+⚬	Ein frozenset([1, 5]) ist identisch mit frozenset([5, 1]).
+⚬	Bevor du eine neue Kombination bewertest und in deinen Pool der "16 Kandidaten" aufnimmst, prüfst du kurz, ob dieses frozenset bereits in dieser Runde existiert. Wenn ja, überspringst du es einfach.
+Damit ist das Problem der überlappenden Pfade zu 100 % gelöst und dein Beam verschwendet keinen Platz für logische Klone.
